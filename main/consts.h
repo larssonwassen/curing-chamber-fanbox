@@ -124,5 +124,7 @@ void getMAC(char* out);
 void print_ip_info(const char* tag);
 void dns_debug(const char *host, const char *service);
 void waitForBit(int bit);
+/// Bounded variant. Returns false if the bit did not appear within the timeout.
+bool waitForBit(int bit, TickType_t timeout_ticks);
 
 #endif // _CONSTS_H

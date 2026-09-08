@@ -161,3 +161,8 @@ void dns_debug(const char *host, const char *service)
 void waitForBit(int bit) {
 	xEventGroupWaitBits(network_state_event_group, bit, false, true, portMAX_DELAY);
 }
+
+bool waitForBit(int bit, TickType_t timeout_ticks) {
+	EventBits_t bits = xEventGroupWaitBits(network_state_event_group, bit, false, true, timeout_ticks);
+	return (bits & bit) != 0;
+}

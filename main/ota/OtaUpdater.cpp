@@ -35,6 +35,21 @@ static const int MAX_CHUNK_RETRIES = 5;
 // again. ThingsBoard does not re-send it unaided.
 static const int64_t FAILED_RETRY_US = 300LL * 1000 * 1000;
 
+// How long a freshly-installed image gets to reach the broker before it gives
+// up and reboots itself.
+//
+// The bootloader's rollback only triggers on a reset. An image that boots,
+// stays up, and simply cannot reach the broker is therefore never rolled back
+// -- it sits unconfirmed forever, which for a device sealed inside a chamber
+// means someone has to open it and hold the reset line. This timer is what
+// makes that case self-correcting.
+//
+// Ten minutes is deliberately generous: it has to cover a slow DHCP lease, a
+// broker that is briefly down, or a WiFi network that comes back after the
+// device does. Rebooting a good image costs a few seconds; failing to reboot a
+// bad one costs a trip to the chamber.
+static const TickType_t PENDING_VERIFY_TIMEOUT = pdMS_TO_TICKS(10 * 60 * 1000);
+
 enum class State {
 	Idle,
 	Downloading,
@@ -239,16 +254,36 @@ int chunkIndexFromTopic(const char* topic) {
 }
 
 void supervisorTask(void* arg) {
-	waitForBit(MQTT_CONNECTED_BIT);
+	// Read this before waiting on anything: whether the running image still has
+	// to prove itself decides how long that wait is allowed to be.
+	const esp_partition_t* running = esp_ota_get_running_partition();
+	esp_ota_img_states_t ota_state;
+	bool pending_verify =
+		esp_ota_get_state_partition(running, &ota_state) == ESP_OK &&
+		ota_state == ESP_OTA_IMG_PENDING_VERIFY;
+
+	if (pending_verify) {
+		if (!waitForBit(MQTT_CONNECTED_BIT, PENDING_VERIFY_TIMEOUT)) {
+			// Still unconfirmed and out of time. Rebooting is what hands the
+			// decision to the bootloader, which boots the previous slot because
+			// this image never called esp_ota_mark_app_valid_cancel_rollback().
+			ESP_LOGE(TAG, "No broker connection %d minutes after an update; "
+						  "rebooting %s to roll back",
+					 (int)(PENDING_VERIFY_TIMEOUT / configTICK_RATE_HZ / 60), running->label);
+			// No report() here -- there is no broker to report to, which is the
+			// entire reason this branch was taken.
+			vTaskDelay(pdMS_TO_TICKS(100)); // Let the log line reach the UART.
+			esp_restart();
+		}
+	} else {
+		waitForBit(MQTT_CONNECTED_BIT);
+	}
 
 	// Confirm the running image. Until this call the bootloader will roll back
 	// to the previous slot on the next reset, which is exactly what should
 	// happen to an image that cannot get this far -- it means WiFi and the
 	// broker are both reachable on the new firmware.
-	const esp_partition_t* running = esp_ota_get_running_partition();
-	esp_ota_img_states_t ota_state;
-	if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK &&
-		ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
+	if (pending_verify) {
 		esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
 		if (err == ESP_OK) {
 			ESP_LOGI(TAG, "Confirmed the new image on %s; rollback cancelled", running->label);

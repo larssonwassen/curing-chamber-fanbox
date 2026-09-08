@@ -147,6 +147,12 @@ WiFi *and* the broker are both reachable on the new firmware — an image that c
 that far rolls itself back on the next reset instead of stranding a device inside a
 sealed chamber.
 
+Rollback needs a reset to happen, so an unconfirmed image that stays up and simply cannot
+reach the broker would otherwise sit there forever. A ten-minute timer covers that: an
+image still unconfirmed when it expires reboots itself, and the bootloader then takes the
+previous slot. Only images in pending-verify are on that timer — a confirmed image waits
+for the broker indefinitely, as it should.
+
 ## Flash wear
 
 The unit that ran the chamber persisted every telemetry update to NVS. `fanRPM` changes
