@@ -137,15 +137,50 @@ The tagged build attaches the image and its SHA-256 to a GitHub release:
 https://github.com/larssonwassen/curing-chamber-fanbox/releases/download/vX.Y.Z/curing-chamber-fanbox-X.Y.Z.bin
 ```
 
-Upload that to ThingsBoard as a firmware package whose title matches the project name,
-then assign it to the device — assignment is what starts the update. ThingsBoard computes
-its own checksum on upload; the `.sha256` beside the asset is there to check it against.
-
 Every build, tagged or not, also uploads the image as a workflow artifact, which is the
 convenient way to test a branch without building locally.
 
 Note that the device implements ThingsBoard's MQTT chunk protocol only. A package created
-as an *external URL* is not enough — the binary has to be stored in ThingsBoard itself.
+as an *external URL* is not enough — the binary has to be stored in ThingsBoard itself,
+which is why the release asset is a convenience for humans and not something the device
+can be pointed at.
+
+#### Publishing to ThingsBoard
+
+The same tagged build uploads the image to ThingsBoard as a firmware package, using
+[`tools/tb_upload_firmware.sh`](tools/tb_upload_firmware.sh). It creates the package,
+uploads the binary with the SHA-256 CI computed, and stops there — it does **not** assign
+the package to anything. Assignment is what actually starts an update on the device in the
+chamber, so it stays a manual click made by someone who can watch what happens.
+
+The step is skipped when the settings below are absent, so the build still works on a fork
+or in a repo that has no ThingsBoard.
+
+| Setting | Kind | Value |
+| --- | --- | --- |
+| `TB_URL` | variable | e.g. `https://thingsboard.example.com` |
+| `TB_USERNAME` | secret | a ThingsBoard tenant-administrator login |
+| `TB_PASSWORD` | secret | its password |
+| `TB_DEVICE_PROFILE_NAME` | variable | device profile the package belongs to, e.g. `default` |
+
+Repository settings → Secrets and variables → Actions; variables and secrets are separate
+tabs there. `TB_DEVICE_PROFILE_ID` may be given as a variable instead of the name, which
+skips the lookup. Creating an OTA package requires tenant-administrator rights in
+ThingsBoard, so make a dedicated CI user rather than reusing a personal login: the
+credential lives in a repository secret, and anyone who can push a workflow to the repo
+can use it.
+
+The script also runs from a laptop, against a locally built image:
+
+```bash
+TB_URL=https://thingsboard.example.com \
+TB_USERNAME=ci@example.com TB_PASSWORD=... \
+TB_DEVICE_PROFILE_NAME=default \
+./tools/tb_upload_firmware.sh build/curing-chamber-fanbox.bin 0.4.0
+```
+
+Re-running it for a version that already exists is a no-op — ThingsBoard rejects a
+duplicate title and version, so the script checks first and exits cleanly.
 
 ### Tests
 

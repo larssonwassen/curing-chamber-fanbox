@@ -12,6 +12,8 @@ jobs:
   # are the same directory and a mismatched include still compiles.
   firmware:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.image.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -70,6 +72,39 @@ jobs:
             dist/*.bin
             dist/*.bin.sha256
           generate_release_notes: true
+
+  # Tags only, and only once the image itself is published. Uploading a package
+  # to ThingsBoard is inert -- it becomes an available firmware, nothing more.
+  # Assignment, which is what actually starts an update on the device in the
+  # chamber, stays a manual decision made by a person looking at that device.
+  #
+  # Skipped silently when the secrets are absent, so a fork can still build.
+  thingsboard:
+    needs: firmware
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: firmware-${{ needs.firmware.outputs.version }}
+          path: dist
+
+      - name: Upload to ThingsBoard
+        env:
+          TB_URL: ${{ vars.TB_URL }}
+          TB_USERNAME: ${{ secrets.TB_USERNAME }}
+          TB_PASSWORD: ${{ secrets.TB_PASSWORD }}
+          TB_DEVICE_PROFILE_NAME: ${{ vars.TB_DEVICE_PROFILE_NAME }}
+          TB_DEVICE_PROFILE_ID: ${{ vars.TB_DEVICE_PROFILE_ID }}
+          VERSION: ${{ needs.firmware.outputs.version }}
+        run: |
+          if [ -z "$TB_URL" ] || [ -z "$TB_USERNAME" ] || [ -z "$TB_PASSWORD" ]; then
+            echo "::notice::ThingsBoard credentials not configured; skipping upload"
+            exit 0
+          fi
+          ./tools/tb_upload_firmware.sh "dist/curing-chamber-fanbox-${VERSION}.bin" "$VERSION"
 
   # The parsing code is target-independent, so it can run under the sanitizers
   # on the host. These cover the paths that take untrusted input: MQTT payloads
