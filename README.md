@@ -114,6 +114,13 @@ a built-in default. See [`provisioning/README.md`](provisioning/README.md).
 `otadata`, `phy_init` and a 256 KB NVS above them. `0x9000-0xFFFF` is left unmapped —
 that is where the original NVS partition sat, and it is past its rated erase endurance.
 
+### Releasing an update
+
+`PROJECT_VER` in the top-level [`CMakeLists.txt`](CMakeLists.txt) is baked into the app
+descriptor and reported to ThingsBoard as `current_fw_version`. Bump it, build, and
+upload `build/curing-chamber-fanbox.bin` to ThingsBoard as a firmware package whose title
+matches the project name. Assigning it to the device is what starts the update.
+
 ### Tests
 
 The parsing code is target-independent and has host tests under ASan/UBSan:
@@ -121,6 +128,24 @@ The parsing code is target-independent and has host tests under ASan/UBSan:
 ```bash
 make -C test/host
 ```
+
+## Updates
+
+Firmware is pulled over ThingsBoard's MQTT OTA protocol — see
+[`main/ota/OtaUpdater.cpp`](main/ota/OtaUpdater.cpp). ThingsBoard announces the target as
+shared attributes (`fw_title`, `fw_version`, `fw_size`, `fw_checksum`,
+`fw_checksum_algorithm`); the device pulls the image a chunk at a time and reports
+progress back as an `fw_state` telemetry value.
+
+Fragments are written straight into the inactive OTA slot as they arrive, so nothing
+buffers a whole chunk. The image is only booted once its digest matches the announced
+`fw_checksum`; SHA-256/384/512 are accepted and everything else is refused rather than
+installed unverified.
+
+The bootloader boots a new image in the pending-verify state. It is confirmed only after
+WiFi *and* the broker are both reachable on the new firmware — an image that cannot get
+that far rolls itself back on the next reset instead of stranding a device inside a
+sealed chamber.
 
 ## Flash wear
 

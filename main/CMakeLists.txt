@@ -13,6 +13,7 @@ idf_component_register(
         "JsonParser/JsonParser.cpp"
         "ram_info.cpp"
         "mqtt.cpp"
+        "ota/OtaUpdater.cpp"
         "log_streamer.cpp"
         "util.cpp"
     INCLUDE_DIRS

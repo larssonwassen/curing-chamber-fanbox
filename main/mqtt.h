@@ -9,5 +9,7 @@
 
 extern esp_mqtt_client_handle_t mqtt_client;
 void mqtt_setup(void);
+void subscribe(const char* topic);
+void request_attributes(void);
 
 #endif // MQTT_CLIENT_H

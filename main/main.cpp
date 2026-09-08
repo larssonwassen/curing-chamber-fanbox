@@ -32,6 +32,7 @@
 #include "log_streamer.h"
 #include "mqtt.h"
 #include "config/DeviceConfig.h"
+#include "ota/OtaUpdater.h"
 
 
 static const char *TAG = "curing-chamber-fanbox";
@@ -467,6 +468,9 @@ extern "C" void app_main(void) {
 
 	
 	log_streamer_setup();
+	// Started before the client so its supervisor is already waiting on
+	// MQTT_CONNECTED_BIT, and its lock exists before any attributes can arrive.
+	OtaUpdater::begin();
 	wifi_setup();
 	mqtt_setup();
 
