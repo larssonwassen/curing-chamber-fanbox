@@ -1,5 +1,7 @@
 #include "consts.h"
 #include "esp_netif.h"
+#include "nvs.h"
+#include "nvs_flash.h"
 
 EventGroupHandle_t network_state_event_group;
 const int WIFI_CONNECTED_BIT = BIT0;
@@ -12,10 +14,77 @@ Telemetry* telemetry;
 SharedAttributes* shared_attributes;
 Attributes* attributes;
 
+/**
+ * @brief Log NVS usage so partition churn is observable.
+ *
+ * Call at boot and again later to compare: used_entries climbing while nothing
+ * is being configured means something is writing to flash on a hot path.
+ */
+void log_nvs_stats(const char* when) {
+	nvs_stats_t stats;
+	esp_err_t err = nvs_get_stats(NULL, &stats);
+	if (err != ESP_OK) {
+		ESP_LOGW(TAG, "nvs_get_stats(%s) failed: %s", when, esp_err_to_name(err));
+		return;
+	}
+	ESP_LOGI(TAG, "NVS (%s): used=%u free=%u total=%u namespaces=%u",
+			 when,
+			 (unsigned)stats.used_entries,
+			 (unsigned)stats.free_entries,
+			 (unsigned)stats.total_entries,
+			 (unsigned)stats.namespace_count);
+}
+
+/**
+ * @brief Erase the telemetry keys that older firmware persisted on every update.
+ *
+ * Telemetry no longer carries NVS keys (see Telemetry in consts.h), so these
+ * entries are dead weight in an already heavily worn partition. Erasing them is
+ * a one-shot cost: after the first boot on this firmware the keys are gone and
+ * every subsequent call is a no-op that writes nothing.
+ */
+static void purge_legacy_telemetry_keys(void) {
+	static const char* const legacy_keys[] = { "fd", "fr", "t", "h" };
+
+	nvs_handle_t handle;
+	esp_err_t err = nvs_open("atomic_vars", NVS_READWRITE, &handle);
+	if (err == ESP_ERR_NVS_NOT_FOUND) {
+		return; // Namespace never created; nothing to purge.
+	}
+	if (err != ESP_OK) {
+		ESP_LOGW(TAG, "nvs_open(atomic_vars) for purge failed: %s", esp_err_to_name(err));
+		return;
+	}
+
+	bool erased_any = false;
+	for (size_t i = 0; i < sizeof(legacy_keys) / sizeof(legacy_keys[0]); i++) {
+		err = nvs_erase_key(handle, legacy_keys[i]);
+		if (err == ESP_OK) {
+			ESP_LOGI(TAG, "Purged legacy telemetry NVS key '%s'", legacy_keys[i]);
+			erased_any = true;
+		} else if (err != ESP_ERR_NVS_NOT_FOUND) {
+			ESP_LOGW(TAG, "nvs_erase_key('%s') failed: %s", legacy_keys[i], esp_err_to_name(err));
+		}
+	}
+
+	// Only commit when something actually changed, so the steady state costs no
+	// flash writes at all.
+	if (erased_any) {
+		err = nvs_commit(handle);
+		if (err != ESP_OK) {
+			ESP_LOGW(TAG, "nvs_commit() after purge failed: %s", esp_err_to_name(err));
+		}
+	}
+	nvs_close(handle);
+}
+
 void init_consts(void) {
 	network_state_event_group = xEventGroupCreate();
 	configASSERT(network_state_event_group);
-	
+
+	log_nvs_stats("boot");
+	purge_legacy_telemetry_keys();
+
 	shared_attributes = new SharedAttributes();
 	configASSERT(shared_attributes);
 

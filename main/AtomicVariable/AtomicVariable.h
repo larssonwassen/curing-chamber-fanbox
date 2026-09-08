@@ -6,6 +6,7 @@
 #include "freertos/semphr.h"
 #include "nvs_flash.h"
 #include "nvs.h"
+#include "esp_log.h"
 
 /**
  * @brief Thread-safe atomic variable wrapper with semaphore protection
@@ -113,21 +114,40 @@ private:
 	 */
 	void loadFromNVS(void) {
 		if (flash_key_ == nullptr) return;
-		
+
 		nvs_handle_t nvs_handle;
 		esp_err_t err = nvs_open("atomic_vars", NVS_READONLY, &nvs_handle);
+		if (err == ESP_ERR_NVS_NOT_FOUND) {
+			// Namespace does not exist yet: first boot, or after an NVS erase.
+			// Seed it with the compiled-in default.
+			saveToNVS();
+			return;
+		}
+		if (err != ESP_OK) {
+			ESP_LOGE(TAG_, "nvs_open(atomic_vars, RO) failed for '%s': %s",
+					 flash_key_, esp_err_to_name(err));
+			return;
+		}
+
+		size_t required_size = sizeof(T);
+		T v;
+		err = nvs_get_blob(nvs_handle, flash_key_, &v, &required_size);
+		nvs_close(nvs_handle);
+
 		if (err == ESP_OK) {
-			size_t required_size = sizeof(T);
-			T v;
-			err = nvs_get_blob(nvs_handle, flash_key_, &v, &required_size);
-			nvs_close(nvs_handle);
-			if (err == ESP_OK) {
-				value_ = v;
-			} else if (err == ESP_ERR_NVS_NOT_FOUND) {
+			if (required_size != sizeof(T)) {
+				// Stored blob was written by a build with a different type width.
+				// Keep the default rather than reinterpreting the bytes.
+				ESP_LOGW(TAG_, "Stored size mismatch for '%s' (%u stored, %u expected); keeping default",
+						 flash_key_, (unsigned)required_size, (unsigned)sizeof(T));
 				saveToNVS();
 			} else {
-				ESP_LOGE(TAG_, "Failed to load value from NVS: %s", esp_err_to_name(err));
+				value_ = v;
 			}
+		} else if (err == ESP_ERR_NVS_NOT_FOUND) {
+			saveToNVS();
+		} else {
+			ESP_LOGE(TAG_, "nvs_get_blob('%s') failed: %s", flash_key_, esp_err_to_name(err));
 		}
 	}
 	
@@ -136,18 +156,30 @@ private:
 	 */
 	void saveToNVS(void) {
 		if (flash_key_ == nullptr) return;
-		
+
 		nvs_handle_t nvs_handle;
 		esp_err_t err = nvs_open("atomic_vars", NVS_READWRITE, &nvs_handle);
-		if (err == ESP_OK) {
-			err = nvs_set_blob(nvs_handle, flash_key_, &value_, sizeof(T));
-			if (err == ESP_OK) {
-				nvs_commit(nvs_handle);
-			} else {
-				ESP_LOGE(TAG_, "Failed to save value to NVS: %s", esp_err_to_name(err));
-			}
-			nvs_close(nvs_handle);
+		if (err != ESP_OK) {
+			ESP_LOGE(TAG_, "nvs_open(atomic_vars, RW) failed for '%s': %s",
+					 flash_key_, esp_err_to_name(err));
+			return;
 		}
+
+		err = nvs_set_blob(nvs_handle, flash_key_, &value_, sizeof(T));
+		if (err != ESP_OK) {
+			ESP_LOGE(TAG_, "nvs_set_blob('%s') failed: %s", flash_key_, esp_err_to_name(err));
+			nvs_close(nvs_handle);
+			return;
+		}
+
+		// The commit is what actually costs a flash write. Its return value was
+		// discarded before, which is why a million of them went unnoticed.
+		err = nvs_commit(nvs_handle);
+		if (err != ESP_OK) {
+			ESP_LOGE(TAG_, "nvs_commit() failed after writing '%s': %s",
+					 flash_key_, esp_err_to_name(err));
+		}
+		nvs_close(nvs_handle);
 	}
 };
 

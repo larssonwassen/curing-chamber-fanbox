@@ -54,10 +54,14 @@ public:
 
 	Telemetry(void):
 		ChangeTrackable(),
-		fanDuty(0, "fd", onChange, this),
-		fanRPM(0, "fr", onChange, this),
-		temperature(0.0f, "t", onChange, this),
-		humidity(0.0f, "h", onChange, this)
+		// Deliberately no NVS keys. These update on every sensor read (~1 Hz), and
+		// persisting them wore the NVS partition past its rated ~100k erase cycles
+		// per sector. Telemetry is transient by nature -- there is nothing here
+		// worth restoring across a reboot. Legacy keys are purged in init_consts().
+		fanDuty(0, nullptr, onChange, this),
+		fanRPM(0, nullptr, onChange, this),
+		temperature(0.0f, nullptr, onChange, this),
+		humidity(0.0f, nullptr, onChange, this)
 	{}
 };
 extern Telemetry* telemetry;
@@ -115,6 +119,7 @@ extern const int MQTT_CONNECTED_BIT;
 
 
 void init_consts(void);
+void log_nvs_stats(const char* when);
 void getMAC(char* out);
 void print_ip_info(const char* tag);
 void dns_debug(const char *host, const char *service);
