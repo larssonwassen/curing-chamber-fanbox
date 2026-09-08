@@ -3,7 +3,6 @@ idf_component_register(
         "consts.cpp"
         "config/DeviceConfig.cpp"
         "main.cpp"
-        "time.cpp"
         "I2C/I2CDevice.cpp"
         "I2C/I2CBus.cpp"
         "I2C/BusIO_Register.cpp"
