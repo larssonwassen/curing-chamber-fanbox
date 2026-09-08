@@ -12,6 +12,11 @@ jobs:
   # are the same directory and a mismatched include still compiles.
   firmware:
     runs-on: ubuntu-latest
+    # Creating the release needs write access. The default token is read-only
+    # here, and without this the tag build gets a 403 from the releases API
+    # after a three-minute build.
+    permissions:
+      contents: write
     outputs:
       version: ${{ steps.image.outputs.version }}
     steps:
@@ -83,6 +88,8 @@ jobs:
     needs: firmware
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -94,13 +101,14 @@ jobs:
       - name: Upload to ThingsBoard
         env:
           TB_URL: ${{ vars.TB_URL }}
+          TB_API_KEY: ${{ secrets.TB_API_KEY }}
           TB_USERNAME: ${{ secrets.TB_USERNAME }}
           TB_PASSWORD: ${{ secrets.TB_PASSWORD }}
           TB_DEVICE_PROFILE_NAME: ${{ vars.TB_DEVICE_PROFILE_NAME }}
           TB_DEVICE_PROFILE_ID: ${{ vars.TB_DEVICE_PROFILE_ID }}
           VERSION: ${{ needs.firmware.outputs.version }}
         run: |
-          if [ -z "$TB_URL" ] || [ -z "$TB_USERNAME" ] || [ -z "$TB_PASSWORD" ]; then
+          if [ -z "$TB_URL" ] || { [ -z "$TB_API_KEY" ] && [ -z "$TB_PASSWORD" ]; }; then
             echo "::notice::ThingsBoard credentials not configured; skipping upload"
             exit 0
           fi

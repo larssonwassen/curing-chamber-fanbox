@@ -159,22 +159,26 @@ or in a repo that has no ThingsBoard.
 | Setting | Kind | Value |
 | --- | --- | --- |
 | `TB_URL` | variable | e.g. `https://thingsboard.example.com` |
-| `TB_USERNAME` | secret | a ThingsBoard tenant-administrator login |
-| `TB_PASSWORD` | secret | its password |
+| `TB_API_KEY` | secret | ThingsBoard API key, created under the user's profile |
 | `TB_DEVICE_PROFILE_NAME` | variable | device profile the package belongs to, e.g. `default` |
 
 Repository settings → Secrets and variables → Actions; variables and secrets are separate
 tabs there. `TB_DEVICE_PROFILE_ID` may be given as a variable instead of the name, which
-skips the lookup. Creating an OTA package requires tenant-administrator rights in
-ThingsBoard, so make a dedicated CI user rather than reusing a personal login: the
-credential lives in a repository secret, and anyone who can push a workflow to the repo
-can use it.
+skips the lookup.
+
+An API key authenticates as `X-Authorization: ApiKey <key>` and carries the permissions of
+the user that created it; creating an OTA package needs tenant-administrator rights. A key
+is preferable to a password in CI because it can be disabled on its own, without changing
+a login anyone still uses — worth doing the moment a build looks wrong, since the secret
+sits in a repository that anyone with push access can run workflows in.
+
+`TB_USERNAME` and `TB_PASSWORD` still work as a fallback, logging in for a JWT, for an
+instance where API keys are unavailable.
 
 The script also runs from a laptop, against a locally built image:
 
 ```bash
-TB_URL=https://thingsboard.example.com \
-TB_USERNAME=ci@example.com TB_PASSWORD=... \
+TB_URL=https://thingsboard.example.com TB_API_KEY=tb_... \
 TB_DEVICE_PROFILE_NAME=default \
 ./tools/tb_upload_firmware.sh build/curing-chamber-fanbox.bin 0.4.0
 ```
