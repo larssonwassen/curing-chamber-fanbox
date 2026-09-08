@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Builds for the target. This is what catches the case-sensitivity class of
+  # bug: the project developed on macOS APFS, where JSONBuilder/ and JsonBuilder/
+  # are the same directory and a mismatched include still compiles.
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build with ESP-IDF 6.0
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v6.0.2
+          target: esp32s3
+
+  # The parsing code is target-independent, so it can run under the sanitizers
+  # on the host. These cover the paths that take untrusted input: MQTT payloads
+  # and log text.
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make -C test/host

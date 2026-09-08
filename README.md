@@ -9,9 +9,9 @@ set by a panel potentiometer read on the ADC; the control loop decides only whet
 fan runs. Both the setpoint and the manual override are adjustable remotely as
 ThingsBoard shared attributes.
 
-> **Status: reference snapshot.** This is the as-built firmware that has been running the
-> chamber, published as a baseline before a planned refactor. It builds against
-> ESP-IDF 5.3 and is known not to build on 6.x yet. See [Known limitations](#known-limitations).
+Commit `57b09f3` is the as-built reference snapshot: the firmware that ran the chamber
+before any of this rework, kept as a baseline. Everything since builds against
+ESP-IDF 6.0.
 
 ## Hardware
 
@@ -67,7 +67,8 @@ Arduino-flavoured I²C abstraction ([`main/I2C`](main/I2C)).
 
 `fan_running`, `fan_enabled`, `ram_free`, `ram_total`.
 
-**Shared attributes** (set from ThingsBoard, persisted to NVS on the device):
+**Shared attributes** (set from ThingsBoard, persisted to NVS on the device). Telemetry
+is *not* persisted — see [Flash wear](#flash-wear):
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -81,12 +82,8 @@ Arduino-flavoured I²C abstraction ([`main/I2C`](main/I2C)).
 
 ## Building
 
-Requires ESP-IDF **5.3** and an ESP32-S3 target.
-
-Credentials are placeholders in this snapshot and must be filled in before building:
-
-- WiFi SSID and PSK — [`main/main.cpp`](main/main.cpp)
-- ThingsBoard host, device ID, access token — [`main/mqtt.h`](main/mqtt.h)
+Requires ESP-IDF **6.0** and an ESP32-S3 target. `esp-mqtt` is pulled in by the IDF
+Component Manager from [`main/idf_component.yml`](main/idf_component.yml).
 
 ```bash
 idf.py set-target esp32s3
@@ -94,24 +91,86 @@ idf.py build
 idf.py -p /dev/cu.usbmodemXXXX flash monitor
 ```
 
+`sdkconfig` is generated from [`sdkconfig.defaults`](sdkconfig.defaults) and is not
+committed.
+
+### Credentials
+
+No credential is compiled into the firmware. WiFi and ThingsBoard details are read at
+boot from the NVS namespace `provision`, written once per device:
+
+```bash
+cp provisioning/secrets.csv.example provisioning/secrets.csv
+$EDITOR provisioning/secrets.csv
+./provisioning/provision.sh /dev/cu.usbmodemXXXX
+```
+
+An unprovisioned device stops at boot with a repeating error rather than falling back to
+a built-in default. See [`provisioning/README.md`](provisioning/README.md).
+
+### Flash layout
+
+[`partitions.csv`](partitions.csv) maps the full 16 MB: two 3 MB OTA slots, then
+`otadata`, `phy_init` and a 256 KB NVS above them. `0x9000-0xFFFF` is left unmapped —
+that is where the original NVS partition sat, and it is past its rated erase endurance.
+
+### Releasing an update
+
+`PROJECT_VER` in the top-level [`CMakeLists.txt`](CMakeLists.txt) is baked into the app
+descriptor and reported to ThingsBoard as `current_fw_version`. Bump it, build, and
+upload `build/curing-chamber-fanbox.bin` to ThingsBoard as a firmware package whose title
+matches the project name. Assigning it to the device is what starts the update.
+
+### Tests
+
+The parsing code is target-independent and has host tests under ASan/UBSan:
+
+```bash
+make -C test/host
+```
+
+## Updates
+
+Firmware is pulled over ThingsBoard's MQTT OTA protocol — see
+[`main/ota/OtaUpdater.cpp`](main/ota/OtaUpdater.cpp). ThingsBoard announces the target as
+shared attributes (`fw_title`, `fw_version`, `fw_size`, `fw_checksum`,
+`fw_checksum_algorithm`); the device pulls the image a chunk at a time and reports
+progress back as an `fw_state` telemetry value.
+
+Fragments are written straight into the inactive OTA slot as they arrive, so nothing
+buffers a whole chunk. The image is only booted once its digest matches the announced
+`fw_checksum`; SHA-256/384/512 are accepted and everything else is refused rather than
+installed unverified.
+
+The bootloader boots a new image in the pending-verify state. It is confirmed only after
+WiFi *and* the broker are both reachable on the new firmware — an image that cannot get
+that far rolls itself back on the next reset instead of stranding a device inside a
+sealed chamber.
+
+Rollback needs a reset to happen, so an unconfirmed image that stays up and simply cannot
+reach the broker would otherwise sit there forever. A ten-minute timer covers that: an
+image still unconfirmed when it expires reboots itself, and the bootloader then takes the
+previous slot. Only images in pending-verify are on that timer — a confirmed image waits
+for the broker indefinitely, as it should.
+
+## Flash wear
+
+The unit that ran the chamber persisted every telemetry update to NVS. `fanRPM` changes
+about ten times a second, and each change committed to flash; by the time it was noticed
+the active page sequence number was 1,017,540 — roughly 200,000 erase cycles per sector
+against a rated ~100,000.
+
+Telemetry no longer carries NVS keys, the stale keys are purged once at boot, and
+`nvs_get_stats()` is logged at startup so the partition's usage is visible rather than
+silent. NVS has also moved off the worn sectors entirely.
+
 ## Known limitations
 
-Documented honestly, since this snapshot is a baseline rather than a finished product.
-
-- **Credentials are compiled into the binary.** They belong in NVS, provisioned at flash
-  time, so that firmware images can be shared without leaking them. MQTT is also plaintext
-  (`mqtt://`) rather than TLS.
-- **Telemetry values persist to NVS on every change.** `fanRPM` updates ten times a second,
-  each triggering an `nvs_commit`. On the unit that has been running the chamber, the NVS
-  pages have cycled over a million times — roughly twice the flash's rated erase endurance.
-  Telemetry should not be persisted at all.
-- **No OTA.** The partition table declares 2 MB of a 16 MB flash with a single 1 MB app
-  slot, leaving no room for A/B updates and no rollback if an update fails.
-- **8 MB of PSRAM is unconfigured** and therefore entirely unused.
-- **Does not build on ESP-IDF 6.x.** Needs a config regeneration and API migration.
-- Several buffer-handling paths in the log streamer and JSON parser need bounds fixes.
-- `main/CMakeLists.txt` refers to `JSONBuilder/` where the directory is `JsonBuilder/`;
-  this only builds on case-insensitive filesystems such as macOS APFS.
+- **PSRAM mode is unverified.** `CONFIG_SPIRAM_MODE_OCT` was inferred from the module
+  reporting 8 MB of embedded PSRAM (ESP32-S3R8). The wrong mode fails loudly at boot, so
+  this needs one flash-and-check on hardware.
+- **MQTT defaults to plaintext.** `mqtts://` is supported and verifies against the bundled
+  root CAs, but which one is used depends on the provisioned `tb_uri`.
 
 ## License
 

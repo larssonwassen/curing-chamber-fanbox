@@ -26,17 +26,13 @@
 #include "I2C/I2CDevice.h"
 #include "EMC2101/EMC2101.h"
 #include "SHT31/SHT31.h"
-#include "JSONBuilder/JSONBuilder.h"
+#include "JsonBuilder/JsonBuilder.h"
 #include "ram_info.h"
 #include "consts.h"
 #include "log_streamer.h"
 #include "mqtt.h"
-
-// NOTE: Placeholder credentials. Replace with your own before building.
-// These move to NVS-based provisioning (namespace "provision") in a follow-up,
-// so that firmware binaries can be published without carrying secrets.
-#define WIFI_SSID "YOUR_WIFI_SSID"
-#define WIFI_PSK "YOUR_WIFI_PASSWORD"
+#include "config/DeviceConfig.h"
+#include "ota/OtaUpdater.h"
 
 
 static const char *TAG = "curing-chamber-fanbox";
@@ -85,8 +81,10 @@ static void wifi_setup(void)
 
 	ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
 	wifi_config_t wifi_config = { };
-	strcpy((char*)wifi_config.sta.ssid, WIFI_SSID);
-	strcpy((char*)wifi_config.sta.password, WIFI_PSK);
+	// strlcpy, not strcpy: the credentials come from NVS, and sta.ssid /
+	// sta.password are fixed 32- and 64-byte fields.
+	strlcpy((char*)wifi_config.sta.ssid, DeviceConfig::wifiSsid(), sizeof(wifi_config.sta.ssid));
+	strlcpy((char*)wifi_config.sta.password, DeviceConfig::wifiPsk(), sizeof(wifi_config.sta.password));
 	wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA3_PSK;
 	wifi_config.sta.pmf_cfg.capable = true;
 	wifi_config.sta.pmf_cfg.required = false;
@@ -95,11 +93,18 @@ static void wifi_setup(void)
 	ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
 	ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
-	ESP_LOGI(TAG, "Starting WIFI. SSID: [%s]", WIFI_SSID);
+	// SSID only. The PSK used to be logged here alongside it, which put the
+	// network's credential into the UART log and, via log_streamer, into the
+	// telemetry stream.
+	ESP_LOGI(TAG, "Starting WIFI. SSID: [%s]", DeviceConfig::wifiSsid());
 	ESP_ERROR_CHECK(esp_wifi_start());
 }
 
-static EMC2101 fan; // Declare outside the function or make it static within the function
+// Owned exclusively by fan_task. Nothing else touches it: the EMC2101 driver
+// holds no lock, and every read is a multi-register I2C transaction that a
+// concurrent write would interleave with. Other tasks read telemetry->fanRPM,
+// which fan_task publishes every 100 ms.
+static EMC2101 fan;
 void fan_task(void* arg) {
 	const int max_retries = 3;
 	int retries = 0;
@@ -227,17 +232,20 @@ static void adc_task(void* arg) {
 	adc_continuous_handle_t handle = NULL;
 	ESP_ERROR_CHECK(adc_continuous_new_handle(&adc_config, &handle));
 
-	adc_continuous_config_t dig_cfg;
-	dig_cfg.pattern_num = 1;
-	dig_cfg.sample_freq_hz = 20 * 1000;
-	dig_cfg.conv_mode = ADC_CONV_SINGLE_UNIT_1;
-	dig_cfg.format = ADC_DIGI_OUTPUT_FORMAT_TYPE2;
-
-	adc_digi_pattern_config_t adc_pattern[1];
+	// Zero-init: these config structs gain fields between IDF releases, and any
+	// field left unset would otherwise carry stack garbage into the driver.
+	// `format` is deprecated as of IDF 6 -- the driver selects the only output
+	// format the target supports (TYPE2 on the ESP32-S3), so it is no longer set.
+	adc_digi_pattern_config_t adc_pattern[1] = {};
 	adc_pattern[0].atten = ADC_ATTEN_DB_12;
 	adc_pattern[0].channel = ADC_CHANNEL_0;
 	adc_pattern[0].unit = ADC_UNIT_1;
 	adc_pattern[0].bit_width = 12;
+
+	adc_continuous_config_t dig_cfg = {};
+	dig_cfg.pattern_num = 1;
+	dig_cfg.sample_freq_hz = 20 * 1000;
+	dig_cfg.conv_mode = ADC_CONV_SINGLE_UNIT_1;
 	dig_cfg.adc_pattern = adc_pattern;
 	ESP_ERROR_CHECK(adc_continuous_config(handle, &dig_cfg));
 
@@ -291,7 +299,12 @@ static void adc_task(void* arg) {
 
 				vTaskDelay(25);
 			} else if (ret == ESP_ERR_TIMEOUT) {
-				ESP_LOGE(TAG, "ADC continuous mode driver read timeout");
+				// Not an error: this is how the inner loop ends. The DMA buffer
+				// has been drained, so go back to waiting for the conversion-done
+				// notification that refills it. Logging it at ERROR made a normal
+				// control-flow event look like a fault, and shipped it to
+				// ThingsBoard as one.
+				ESP_LOGD(TAG, "ADC frame buffer drained, waiting for the next conversion");
 				break;
 			} else if (ret == ESP_ERR_INVALID_STATE) {
 				ESP_LOGE(TAG, "ADC continuous mode driver state is invalid");
@@ -396,10 +409,29 @@ static void control_loop_task(void* arg) {
 
 		gpio_set_level(D2, newFanEnabled ? 1 : 0);
 		attributes->fanEnabled.set(newFanEnabled);
-		attributes->fanRunning.set(fan.getFanRPM() > 0);
+		// fan_task owns the EMC2101; take its published reading rather than
+		// issuing a concurrent I2C transaction from this task.
+		attributes->fanRunning.set(telemetry->fanRPM.get() > 0);
 		vTaskDelay(pdMS_TO_TICKS(5000));
 	}
 }
+/**
+ * @brief Stop with a repeating explanation when NVS holds no credentials.
+ *
+ * Deliberately not a reboot loop: rebooting would spam the log with partial
+ * boots and, once OTA rollback is enabled, an unprovisioned image would never
+ * reach esp_ota_mark_app_valid_cancel_rollback() -- which is the right outcome,
+ * but only if the device sits still long enough for the message to be read.
+ */
+static void halt_unprovisioned(esp_err_t err) {
+	while (true) {
+		ESP_LOGE(TAG, "Device is not provisioned (%s).", esp_err_to_name(err));
+		ESP_LOGE(TAG, "Write wifi_ssid, wifi_psk, tb_uri and tb_token to the NVS");
+		ESP_LOGE(TAG, "namespace '%s'. See provisioning/README.md.", DeviceConfig::NVS_NAMESPACE);
+		vTaskDelay(pdMS_TO_TICKS(10000));
+	}
+}
+
 extern "C" void app_main(void) {
 	// Initialize NVS
 	esp_err_t ret = nvs_flash_init();
@@ -409,6 +441,14 @@ extern "C" void app_main(void) {
 	}
 	ESP_ERROR_CHECK(ret);
 	init_consts();
+
+	// Credentials live in NVS, written once per device at flash time. There is
+	// no compile-time fallback on purpose: an unprovisioned device stops here
+	// rather than silently trying to join some default network.
+	esp_err_t cfg_err = DeviceConfig::load();
+	if (cfg_err != ESP_OK) {
+		halt_unprovisioned(cfg_err);
+	}
 
 	ram_log_snapshot("boot");
 	esp_log_level_set("*", shared_attributes->uartLogLevel.get());
@@ -426,10 +466,16 @@ extern "C" void app_main(void) {
 	bool fanEnabled = shared_attributes->fanEnabled.get();
 	ESP_ERROR_CHECK(gpio_set_level(D2, fanEnabled ? 1 : 0));
 	attributes->fanEnabled.set(fanEnabled);
-	attributes->fanRunning.set(fan.getFanRPM() > 0);
+	// The I2C bus is not up yet and fan_task has not run, so the EMC2101 cannot
+	// be queried here -- the old fan.getFanRPM() call only ever returned 0 after
+	// logging a warning. Report not-running until fan_task publishes a reading.
+	attributes->fanRunning.set(false);
 
 	
 	log_streamer_setup();
+	// Started before the client so its supervisor is already waiting on
+	// MQTT_CONNECTED_BIT, and its lock exists before any attributes can arrive.
+	OtaUpdater::begin();
 	wifi_setup();
 	mqtt_setup();
 

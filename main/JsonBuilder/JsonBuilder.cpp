@@ -27,6 +27,28 @@ bool JsonBuilder::ensure_(size_t need) {
 	return true;
 }
 
+/**
+ * @brief Commit the result of an snprintf into buf_.
+ *
+ * snprintf reports the length it *would* have written. Adding that to len_
+ * unchecked lets len_ exceed cap_, after which `cap_ - len_` underflows and
+ * size()/c_str() describe a buffer longer than the one that exists -- which the
+ * MQTT publish calls then read straight out of.
+ *
+ * @param wrote snprintf's return value
+ * @return True if the output fit and len_ was advanced
+ */
+bool JsonBuilder::commitPrintf_(int wrote) {
+	size_t avail = cap_ - len_; // ensure_() has already guaranteed avail > 0
+	if (wrote <= 0 || (size_t)wrote >= avail) {
+		error_ = true;
+		buf_[len_] = '\0'; // Discard whatever snprintf truncated into place.
+		return false;
+	}
+	len_ += (size_t)wrote;
+	return true;
+}
+
 bool JsonBuilder::putChar_(char c) {
 	if (!ensure_(1)) {
 		return false;
@@ -100,12 +122,9 @@ bool JsonBuilder::writeEscaped_(const char* s) {
 						return false;
 					}
 					int wrote = snprintf(buf_ + len_, cap_ - len_, "\\u%04X", (unsigned)c);
-					if (wrote <= 0) {
-						error_ = true;
+					if (!commitPrintf_(wrote)) {
 						return false;
 					}
-					len_ += (size_t)wrote;
-					buf_[len_] = '\0';
 				} else {
 					if (!putChar_((char)c)) {
 						return false;
@@ -125,12 +144,7 @@ bool JsonBuilder::writeInt_(int32_t v) {
 		return false;
 	}
 	int wrote = snprintf(buf_ + len_, cap_ - len_, "%ld", (long)v);
-	if (wrote <= 0) {
-		error_ = true;
-		return false;
-	}
-	len_ += (size_t)wrote;
-	return true;
+	return commitPrintf_(wrote);
 }
 
 bool JsonBuilder::writeUInt_(uint32_t v) {
@@ -139,12 +153,7 @@ bool JsonBuilder::writeUInt_(uint32_t v) {
 		return false;
 	}
 	int wrote = snprintf(buf_ + len_, cap_ - len_, "%lu", (unsigned long)v);
-	if (wrote <= 0) {
-		error_ = true;
-		return false;
-	}
-	len_ += (size_t)wrote;
-	return true;
+	return commitPrintf_(wrote);
 }
 
 bool JsonBuilder::writeDouble_(double v, int prec) {
@@ -154,17 +163,16 @@ bool JsonBuilder::writeDouble_(double v, int prec) {
 	if (prec > 15) {
 		prec = 15;
 	}
+	// A cheap pre-check only. %f is not bounded by 32 characters -- a large
+	// magnitude prints its whole integer part, so 1e300 at 15 decimals runs to
+	// over 300 -- so the real bound is commitPrintf_, which compares against the
+	// space that actually remains.
 	if (!ensure_(32)) {
 		error_ = true;
 		return false;
 	}
 	int wrote = snprintf(buf_ + len_, cap_ - len_, "%.*f", prec, v);
-	if (wrote <= 0) {
-		error_ = true;
-		return false;
-	}
-	len_ += (size_t)wrote;
-	return true;
+	return commitPrintf_(wrote);
 }
 
 bool JsonBuilder::writeBool_(bool v) {

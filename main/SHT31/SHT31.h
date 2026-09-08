@@ -65,6 +65,7 @@ public:
 	
 	bool softReset(void);
 	uint16_t readStatus(void);
+	bool readStatus(uint16_t* out);
 	bool clearStatus(void);
 	
 	bool enableHeater(bool enable);

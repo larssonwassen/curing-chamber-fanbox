@@ -63,6 +63,7 @@ private:
     uint8_t depth_;
 
     bool ensure_(size_t need);
+    bool commitPrintf_(int wrote);
     bool putChar_(char c);
     bool writeStr_(const char* s);
     bool writeRaw_(const char* raw);

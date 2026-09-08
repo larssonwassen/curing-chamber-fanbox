@@ -368,25 +368,41 @@ bool SHT31::softReset(void) {
  * @return Status register value, or 0 if error
  */
 uint16_t SHT31::readStatus(void) {
+	uint16_t status = 0;
+	(void)readStatus(&status);
+	return status;
+}
+
+/**
+ * @brief Read the status register, reporting failure separately from the value.
+ *
+ * The uint16_t-returning overload cannot distinguish a failed read from a
+ * healthy sensor whose status bits are all clear -- both come back as 0.
+ *
+ * @param out Receives the status word; untouched on failure
+ * @return True on a successful, CRC-verified read
+ */
+bool SHT31::readStatus(uint16_t* out) {
 	if (!_sendCommand(SHT31_CMD_READSTATUS)) {
 		ESP_LOGE(TAG, "Failed to send read status command");
-		return 0;
+		return false;
 	}
-	
+
 	// Read 3 bytes: status_msb, status_lsb, status_crc
 	uint8_t data[3];
 	if (!_readResponse(data, 3)) {
 		ESP_LOGE(TAG, "Failed to read status data");
-		return 0;
+		return false;
 	}
-	
+
 	// Verify CRC for status data
 	if (!_verifyCRC(&data[0], data[2])) {
 		ESP_LOGE(TAG, "Status CRC verification failed");
-		return 0;
+		return false;
 	}
-	
-	return (data[0] << 8) | data[1];
+
+	*out = (uint16_t)((data[0] << 8) | data[1]);
+	return true;
 }
 
 /**
@@ -434,8 +450,13 @@ bool SHT31::isHeaterEnabled(void) {
  * @return True if sensor is connected, false otherwise
  */
 bool SHT31::isConnected(void) {
-	uint16_t status = readStatus();
+	// A status word of 0 is a perfectly valid reading -- it means every status
+	// bit is clear -- so testing `status != 0` reported a healthy sensor as
+	// disconnected. What matters is whether the read itself succeeded.
+	uint16_t status = 0;
+	if (!readStatus(&status)) {
+		return false;
+	}
 	ESP_LOGD(TAG, "SHT31 status register: 0x%04X", status);
-	// If we can read a status register, the sensor is connected
-	return status != 0;
+	return true;
 } 

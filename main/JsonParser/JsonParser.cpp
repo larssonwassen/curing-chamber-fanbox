@@ -1,5 +1,6 @@
 #include "JsonParser.h"
 #include <string.h>
+#include <stdlib.h>   // strtod
 #include <stdio.h>
 #include <ctype.h>
 #include <climits>
@@ -216,15 +217,29 @@ bool JsonParser::parse_number_(double* out, int64_t* i64, uint8_t* is_int) {
 		}
 	}
 
-	// Temporarily null-terminate and strtod
-	char saved = *p_;
-	*p_ = '\0';
-	char* endptr = nullptr;
-	double dv = strtod(s, &endptr);
-	*p_ = saved;
-	if (!endptr || endptr == s) {
+	// The scan above has already validated the token and left p_ one past it.
+	// Copy it out to null-terminate for strtod. Writing the terminator into the
+	// document instead (`char saved = *p_; *p_ = '\0';`) is a one-byte write at
+	// json[len] whenever the number runs to the end of the buffer -- and the
+	// MQTT path hands us a slice of the driver's receive buffer, where that byte
+	// is not ours.
+	char tok[64];
+	size_t tok_len = (size_t)(p_ - s);
+	if (tok_len == 0 || tok_len >= sizeof(tok)) {
+		set_error_("number token too long");
 		return false;
 	}
+	memcpy(tok, s, tok_len);
+	tok[tok_len] = '\0';
+
+	char* tok_endptr = nullptr;
+	double dv = strtod(tok, &tok_endptr);
+	if (!tok_endptr || tok_endptr == tok) {
+		return false;
+	}
+	// Map the copy's end back onto the document so the offsets below, and p_,
+	// stay expressed in terms of the original buffer.
+	const char* endptr = s + (size_t)(tok_endptr - tok);
 
 	// Try 64-bit integer exact fit
 	int isint = 1;

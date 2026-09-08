@@ -83,7 +83,14 @@ bool EMC2101::_init(void) {
 	}
 	uint8_t id = val & 0xFF;
 	if (id != EMC2101_CHIP_ID && id != EMC2101_ALT_CHIP_ID) {
-		ESP_LOGW(TAG, "Wrong chip ID: 0x%02X", id);
+		// Continue anyway. The part on this board reports 0x17, which Microchip
+		// documents for neither the EMC2101 (0x16) nor the EMC2101-R (0x28), yet
+		// it drives the fan and returns tachometer readings correctly. Refusing
+		// to initialise over an unrecognised ID would break a working device;
+		// saying nothing would hide a genuinely wrong part.
+		ESP_LOGW(TAG, "Unrecognised chip ID 0x%02X (expected 0x%02X or 0x%02X); "
+					  "continuing on the assumption the register map matches",
+				 id, EMC2101_CHIP_ID, EMC2101_ALT_CHIP_ID);
 	}
 
 	enableTachInput(true);
@@ -401,12 +408,17 @@ uint16_t EMC2101::getFanMinRPM(void) {
 	uint8_t buffer[2];
 	BusIO_Register tach_limit_lsb = BusIO_Register(i2c_dev, EMC2101_TACH_LIMIT_LSB);
 	BusIO_Register tach_limit_msb = BusIO_Register(i2c_dev, EMC2101_TACH_LIMIT_MSB);
-	tach_limit_msb.read(buffer);
-	tach_limit_lsb.read(buffer + 1);
+	// Check the reads: on failure `buffer` keeps whatever was on the stack, and
+	// that garbage was previously divided into.
+	if (!tach_limit_msb.read(buffer) || !tach_limit_lsb.read(buffer + 1)) {
+		ESP_LOGW(TAG, "Failed to read tach limit registers");
+		return 0;
+	}
 
 	uint16_t raw_limit = buffer[0] << 8;
 	raw_limit |= buffer[1];
-	if (raw_limit == 0xFFFF) {
+	// 0xFFFF is the "no limit" encoding; 0 would divide by zero.
+	if (raw_limit == 0xFFFF || raw_limit == 0) {
 		return 0;
 	}
 	return EMC2101_FAN_RPM_NUMERATOR / raw_limit;
@@ -429,7 +441,14 @@ bool EMC2101::setFanMinRPM(uint16_t min_rpm) {
 	BusIO_Register tach_limit_lsb = BusIO_Register(i2c_dev, EMC2101_TACH_LIMIT_LSB);
 	BusIO_Register tach_limit_msb = BusIO_Register(i2c_dev, EMC2101_TACH_LIMIT_MSB);
 	// speed is given in RPM, convert to raw value (MSB+LSB):
-	uint16_t raw_value = EMC2101_FAN_RPM_NUMERATOR / min_rpm;
+	if (min_rpm == 0) {
+		ESP_LOGW(TAG, "setFanMinRPM(0) would divide by zero; ignoring");
+		return false;
+	}
+	// The quotient exceeds 16 bits below roughly 83 RPM; 0xFFFF is the
+	// register's "no limit" encoding, which is the right saturation point.
+	uint32_t raw = EMC2101_FAN_RPM_NUMERATOR / min_rpm;
+	uint16_t raw_value = (raw > 0xFFFF) ? 0xFFFF : (uint16_t)raw;
 	if (!tach_limit_lsb.write(raw_value & 0xFF)) {
 		return false;
 	}
@@ -457,8 +476,10 @@ float EMC2101::getExternalTemperature(void) {
 
 	// Read **MSB** first to match 'Data Read Interlock' behavoior from 6.1 of
 	// datasheet
-	ext_temp_msb.read(buffer);
-	ext_temp_lsb.read(buffer + 1);
+	if (!ext_temp_msb.read(buffer) || !ext_temp_lsb.read(buffer + 1)) {
+		ESP_LOGW(TAG, "Failed to read external temperature registers");
+		return 0.0;
+	}
 
 	int16_t raw_ext = buffer[0] << 8;
 	raw_ext |= buffer[1];
@@ -499,8 +520,10 @@ uint16_t EMC2101::getFanRPM(void) {
 
 	// Read LSB first to match 'Data Read Interlock' behavoior from 6.1 of
 	// datasheet
-	fan_speed_lsb.read(buffer + 1);
-	fan_speed_msb.read(buffer);
+	if (!fan_speed_lsb.read(buffer + 1) || !fan_speed_msb.read(buffer)) {
+		ESP_LOGW(TAG, "Failed to read tach registers");
+		return 0;
+	}
 
 	uint16_t raw_ext = buffer[0] << 8;
 	raw_ext |= buffer[1];

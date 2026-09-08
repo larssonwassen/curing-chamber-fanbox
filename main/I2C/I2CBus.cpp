@@ -147,14 +147,22 @@ bool I2CBus::begin()
     } else if (allocateBusBuffer()) {
         ESP_LOGI(TAG, "Initializing I2C Master: sda=%d scl=%d", sda, scl);
 
-        i2c_master_bus_config_t conf;
+        // Zero-init. Left uninitialized, conf.flags -- including
+        // enable_internal_pullup -- is stack garbage, so whether the bus came up
+        // with pullups varied with whatever the previous call left on the stack.
+        // The struct also gains fields between IDF releases.
+        i2c_master_bus_config_t conf = {};
         conf.i2c_port = num;
         conf.sda_io_num = sda;
         conf.scl_io_num = scl;
         conf.clk_source = I2C_CLK_SRC_DEFAULT;
         conf.glitch_ignore_cnt = 7;
         conf.intr_priority = 0;
-        conf.trans_queue_depth = 0;
+        conf.trans_queue_depth = 0; // 0 = synchronous transactions only
+        // The sensor breakouts carry their own pullups; the internal ones are
+        // weak enough (~45k) to parallel harmlessly and keep the bus defined if
+        // a board without them is ever wired up.
+        conf.flags.enable_internal_pullup = true;
 
         err = i2c_new_master_bus(&conf, &bus_handle);
         if (err != ESP_OK) {
