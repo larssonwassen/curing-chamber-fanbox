@@ -83,7 +83,14 @@ bool EMC2101::_init(void) {
 	}
 	uint8_t id = val & 0xFF;
 	if (id != EMC2101_CHIP_ID && id != EMC2101_ALT_CHIP_ID) {
-		ESP_LOGW(TAG, "Wrong chip ID: 0x%02X", id);
+		// Continue anyway. The part on this board reports 0x17, which Microchip
+		// documents for neither the EMC2101 (0x16) nor the EMC2101-R (0x28), yet
+		// it drives the fan and returns tachometer readings correctly. Refusing
+		// to initialise over an unrecognised ID would break a working device;
+		// saying nothing would hide a genuinely wrong part.
+		ESP_LOGW(TAG, "Unrecognised chip ID 0x%02X (expected 0x%02X or 0x%02X); "
+					  "continuing on the assumption the register map matches",
+				 id, EMC2101_CHIP_ID, EMC2101_ALT_CHIP_ID);
 	}
 
 	enableTachInput(true);

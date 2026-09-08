@@ -251,9 +251,17 @@ static void parse_log_line(const char* line, size_t line_len, LogItem* out) {
 		}
 	} while (false);
 
+	// Usually not a malformed line at all: some components (the wifi driver
+	// among them) emit a payload containing a newline, so everything after it
+	// arrives here as a line with no "L (uptime) module:" header. Nothing is
+	// lost -- the fallback below ships the text as-is -- so this is a debug
+	// note, not a warning. At WARN it fired on every boot and, being itself a
+	// log line, was published to ThingsBoard.
+	//
 	// %.*s consumes an int; a size_t passed here is read as a negative
 	// precision on the value range where it matters, which prints unbounded.
-	UART_LOGW(TAG, "Failed to parse log line: '%.*s'", (int)MIN(line_len, (size_t)INT_MAX), line);
+	UART_LOGD(TAG, "Log line has no header, shipping it raw: '%.*s'",
+			  (int)MIN(line_len, (size_t)INT_MAX), line);
 
 	// fallback
 	strcpy(out->level, "I");

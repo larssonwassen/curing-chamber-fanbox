@@ -299,7 +299,12 @@ static void adc_task(void* arg) {
 
 				vTaskDelay(25);
 			} else if (ret == ESP_ERR_TIMEOUT) {
-				ESP_LOGE(TAG, "ADC continuous mode driver read timeout");
+				// Not an error: this is how the inner loop ends. The DMA buffer
+				// has been drained, so go back to waiting for the conversion-done
+				// notification that refills it. Logging it at ERROR made a normal
+				// control-flow event look like a fault, and shipped it to
+				// ThingsBoard as one.
+				ESP_LOGD(TAG, "ADC frame buffer drained, waiting for the next conversion");
 				break;
 			} else if (ret == ESP_ERR_INVALID_STATE) {
 				ESP_LOGE(TAG, "ADC continuous mode driver state is invalid");
