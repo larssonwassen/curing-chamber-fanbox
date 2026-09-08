@@ -1,0 +1,5 @@
+#ifndef CURING_CHAMBER_FANBOX_H
+#define CURING_CHAMBER_FANBOX_H
+
+
+#endif

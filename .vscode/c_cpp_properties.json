@@ -1,0 +1,19 @@
+{
+    "configurations": [
+        {
+            "name": "ESP-IDF",
+            "compilerPath": "${config:idf.toolsPath}/tools/xtensa-esp-elf/esp-13.2.0_20240530/xtensa-esp-elf/bin/xtensa-esp32s3-elf-g++",
+            "includePath": [
+                "${config:idf.espIdfPath}/components/**",
+                "/Users/xclose/dev/esp32/curing-chamber-fanbox/**"
+            ],
+            "browse": {
+                "path": [
+                    "${config:idf.espIdfPath}/components",
+                    "/Users/xclose/dev/esp32/curing-chamber-fanbox"
+                ]
+            }
+        }
+    ],
+    "version": 4
+}
