@@ -6,6 +6,8 @@
 #include "JsonParser/JsonParser.h"
 #include "JsonBuilder/JsonBuilder.h"
 #include "consts.h"
+#include "config/DeviceConfig.h"
+#include "esp_crt_bundle.h"
 #include <string.h>
 
 static const char *TAG = "mqtt";
@@ -292,16 +294,16 @@ static void mqtt_event_handler(void* event_handler_arg, esp_event_base_t event_b
 }
 
 static void mqtt_setup_task(void* arg) {
-	const esp_mqtt_client_config_t mqtt_cfg = {
-		.broker = {
-			.address = {
-				.uri = MQTT_URL,
-			},
-		},
-		.credentials = {
-			.username = MQTT_ACCESS_TOKEN,
-		},
-	};
+	esp_mqtt_client_config_t mqtt_cfg = {};
+	mqtt_cfg.broker.address.uri = DeviceConfig::mqttUri();
+	mqtt_cfg.credentials.username = DeviceConfig::mqttToken();
+	if (DeviceConfig::mqttUsesTls()) {
+		// Verify against the bundled root CA set. Whether the broker is reached
+		// over TLS is decided by the provisioned URI's scheme, not by a build
+		// flag, so moving a device to mqtts:// is a re-provision rather than a
+		// reflash.
+		mqtt_cfg.broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
+	}
 
 	mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
 	configASSERT(mqtt_client);

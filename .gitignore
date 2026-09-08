@@ -14,3 +14,8 @@ sdkconfig.old
 test/host/test_*
 !test/host/test_*.cpp
 *.dSYM/
+
+# Provisioning inputs and generated NVS images. These carry real credentials;
+# only secrets.csv.example is committed.
+provisioning/secrets.csv
+provisioning/*.bin

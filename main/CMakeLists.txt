@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS 
         "consts.cpp"
+        "config/DeviceConfig.cpp"
         "main.cpp"
         "time.cpp"
         "I2C/I2CDevice.cpp"

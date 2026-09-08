@@ -31,12 +31,7 @@
 #include "consts.h"
 #include "log_streamer.h"
 #include "mqtt.h"
-
-// NOTE: Placeholder credentials. Replace with your own before building.
-// These move to NVS-based provisioning (namespace "provision") in a follow-up,
-// so that firmware binaries can be published without carrying secrets.
-#define WIFI_SSID "YOUR_WIFI_SSID"
-#define WIFI_PSK "YOUR_WIFI_PASSWORD"
+#include "config/DeviceConfig.h"
 
 
 static const char *TAG = "curing-chamber-fanbox";
@@ -85,8 +80,10 @@ static void wifi_setup(void)
 
 	ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
 	wifi_config_t wifi_config = { };
-	strcpy((char*)wifi_config.sta.ssid, WIFI_SSID);
-	strcpy((char*)wifi_config.sta.password, WIFI_PSK);
+	// strlcpy, not strcpy: the credentials come from NVS, and sta.ssid /
+	// sta.password are fixed 32- and 64-byte fields.
+	strlcpy((char*)wifi_config.sta.ssid, DeviceConfig::wifiSsid(), sizeof(wifi_config.sta.ssid));
+	strlcpy((char*)wifi_config.sta.password, DeviceConfig::wifiPsk(), sizeof(wifi_config.sta.password));
 	wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA3_PSK;
 	wifi_config.sta.pmf_cfg.capable = true;
 	wifi_config.sta.pmf_cfg.required = false;
@@ -95,7 +92,10 @@ static void wifi_setup(void)
 	ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
 	ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
-	ESP_LOGI(TAG, "Starting WIFI. SSID: [%s]", WIFI_SSID);
+	// SSID only. The PSK used to be logged here alongside it, which put the
+	// network's credential into the UART log and, via log_streamer, into the
+	// telemetry stream.
+	ESP_LOGI(TAG, "Starting WIFI. SSID: [%s]", DeviceConfig::wifiSsid());
 	ESP_ERROR_CHECK(esp_wifi_start());
 }
 
@@ -409,6 +409,23 @@ static void control_loop_task(void* arg) {
 		vTaskDelay(pdMS_TO_TICKS(5000));
 	}
 }
+/**
+ * @brief Stop with a repeating explanation when NVS holds no credentials.
+ *
+ * Deliberately not a reboot loop: rebooting would spam the log with partial
+ * boots and, once OTA rollback is enabled, an unprovisioned image would never
+ * reach esp_ota_mark_app_valid_cancel_rollback() -- which is the right outcome,
+ * but only if the device sits still long enough for the message to be read.
+ */
+static void halt_unprovisioned(esp_err_t err) {
+	while (true) {
+		ESP_LOGE(TAG, "Device is not provisioned (%s).", esp_err_to_name(err));
+		ESP_LOGE(TAG, "Write wifi_ssid, wifi_psk, tb_uri and tb_token to the NVS");
+		ESP_LOGE(TAG, "namespace '%s'. See provisioning/README.md.", DeviceConfig::NVS_NAMESPACE);
+		vTaskDelay(pdMS_TO_TICKS(10000));
+	}
+}
+
 extern "C" void app_main(void) {
 	// Initialize NVS
 	esp_err_t ret = nvs_flash_init();
@@ -418,6 +435,14 @@ extern "C" void app_main(void) {
 	}
 	ESP_ERROR_CHECK(ret);
 	init_consts();
+
+	// Credentials live in NVS, written once per device at flash time. There is
+	// no compile-time fallback on purpose: an unprovisioned device stops here
+	// rather than silently trying to join some default network.
+	esp_err_t cfg_err = DeviceConfig::load();
+	if (cfg_err != ESP_OK) {
+		halt_unprovisioned(cfg_err);
+	}
 
 	ram_log_snapshot("boot");
 	esp_log_level_set("*", shared_attributes->uartLogLevel.get());
