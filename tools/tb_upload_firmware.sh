@@ -2,10 +2,13 @@
 #
 # Upload a firmware image to ThingsBoard as an OTA package.
 #
-#   TB_URL=https://tb.example.com \
-#   TB_USERNAME=ci@example.com TB_PASSWORD=... \
+#   TB_URL=https://tb.example.com TB_API_KEY=tb_... \
 #   TB_DEVICE_PROFILE_NAME=default \
 #   ./tools/tb_upload_firmware.sh build/curing-chamber-fanbox.bin 0.4.0
+#
+# Authenticates with a ThingsBoard API key (TB_API_KEY) when one is set, and
+# otherwise logs in with TB_USERNAME/TB_PASSWORD for a JWT. Prefer the API key:
+# it is revocable on its own, and it keeps an account password out of CI.
 #
 # The package title is fixed to the project name, because that is what the
 # device compares against: OtaUpdater ignores an announcement whose fw_title is
@@ -34,12 +37,14 @@ if [ ! -f "$BIN" ]; then
 	exit 1
 fi
 
-for var in TB_URL TB_USERNAME TB_PASSWORD; do
-	if [ -z "${!var:-}" ]; then
-		echo "$var is not set" >&2
-		exit 2
-	fi
-done
+if [ -z "${TB_URL:-}" ]; then
+	echo "TB_URL is not set" >&2
+	exit 2
+fi
+if [ -z "${TB_API_KEY:-}" ] && { [ -z "${TB_USERNAME:-}" ] || [ -z "${TB_PASSWORD:-}" ]; }; then
+	echo "Set TB_API_KEY, or both TB_USERNAME and TB_PASSWORD" >&2
+	exit 2
+fi
 if [ -z "${TB_DEVICE_PROFILE_ID:-}" ] && [ -z "${TB_DEVICE_PROFILE_NAME:-}" ]; then
 	echo "Set TB_DEVICE_PROFILE_ID, or TB_DEVICE_PROFILE_NAME to look it up" >&2
 	exit 2
@@ -51,26 +56,35 @@ api() {
 	# api <method> <path> [curl args...]; prints the response body.
 	local method="$1" path="$2"; shift 2
 	curl -sS -f --max-time 300 -X "$method" "${TB_URL}${path}" \
-		-H "X-Authorization: Bearer ${TOKEN}" "$@"
+		-H "X-Authorization: ${AUTH}" "$@"
 }
 
-echo "Authenticating to ${TB_URL} as ${TB_USERNAME}"
-# --data @- so the password never appears in the process list, where any other
-# process on the machine could read it out of /proc.
-if ! LOGIN_BODY="$(
-	jq -nc --arg u "$TB_USERNAME" --arg p "$TB_PASSWORD" '{username:$u, password:$p}' |
-	curl -sS -f --max-time 60 -X POST "${TB_URL}/api/auth/login" \
-		-H 'Content-Type: application/json' --data @-
-)"; then
-	echo "Login to ${TB_URL} failed (401 above means the credentials are wrong)" >&2
-	exit 1
+# ThingsBoard takes either scheme in the same header: an API key verbatim with an
+# "ApiKey" prefix, or a JWT from /api/auth/login with a "Bearer" prefix. The key
+# needs no login round trip and carries the permissions of the user it belongs to.
+if [ -n "${TB_API_KEY:-}" ]; then
+	echo "Authenticating to ${TB_URL} with an API key"
+	AUTH="ApiKey ${TB_API_KEY}"
+else
+	echo "Authenticating to ${TB_URL} as ${TB_USERNAME}"
+	# --data @- so the password never appears in the process list, where any other
+	# process on the machine could read it out of /proc.
+	if ! LOGIN_BODY="$(
+		jq -nc --arg u "$TB_USERNAME" --arg p "$TB_PASSWORD" '{username:$u, password:$p}' |
+		curl -sS -f --max-time 60 -X POST "${TB_URL}/api/auth/login" \
+			-H 'Content-Type: application/json' --data @-
+	)"; then
+		echo "Login to ${TB_URL} failed (401 above means the credentials are wrong)" >&2
+		exit 1
+	fi
+	TOKEN="$(printf '%s' "$LOGIN_BODY" | jq -r '.token')"
+	if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+		echo "Login succeeded but returned no token" >&2
+		exit 1
+	fi
+	unset LOGIN_BODY
+	AUTH="Bearer ${TOKEN}"
 fi
-TOKEN="$(printf '%s' "$LOGIN_BODY" | jq -r '.token')"
-if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
-	echo "Login succeeded but returned no token" >&2
-	exit 1
-fi
-unset LOGIN_BODY
 
 PROFILE_ID="${TB_DEVICE_PROFILE_ID:-}"
 if [ -z "$PROFILE_ID" ]; then
