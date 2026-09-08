@@ -126,9 +126,26 @@ that is where the original NVS partition sat, and it is past its rated erase end
 ### Releasing an update
 
 `PROJECT_VER` in the top-level [`CMakeLists.txt`](CMakeLists.txt) is baked into the app
-descriptor and reported to ThingsBoard as `current_fw_version`. Bump it, build, and
-upload `build/curing-chamber-fanbox.bin` to ThingsBoard as a firmware package whose title
-matches the project name. Assigning it to the device is what starts the update.
+descriptor and reported to ThingsBoard as `current_fw_version`. Bump it, tag the commit
+`vX.Y.Z`, and push the tag. CI refuses to build a tag that disagrees with `PROJECT_VER` —
+a package whose version differs from what the image reports installs and then still looks
+out of date, which is an update loop.
+
+The tagged build attaches the image and its SHA-256 to a GitHub release:
+
+```
+https://github.com/larssonwassen/curing-chamber-fanbox/releases/download/vX.Y.Z/curing-chamber-fanbox-X.Y.Z.bin
+```
+
+Upload that to ThingsBoard as a firmware package whose title matches the project name,
+then assign it to the device — assignment is what starts the update. ThingsBoard computes
+its own checksum on upload; the `.sha256` beside the asset is there to check it against.
+
+Every build, tagged or not, also uploads the image as a workflow artifact, which is the
+convenient way to test a branch without building locally.
+
+Note that the device implements ThingsBoard's MQTT chunk protocol only. A package created
+as an *external URL* is not enough — the binary has to be stored in ThingsBoard itself.
 
 ### Tests
 
