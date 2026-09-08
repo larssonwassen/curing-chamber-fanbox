@@ -71,13 +71,22 @@ public:
 	 */
 	void set(const T& new_value) {
 		bool changed = false;
+		T snapshot{};
 		if (xSemaphoreTake(semaphore_, portMAX_DELAY) == pdTRUE) {
 			changed = new_value != value_;
 			value_ = new_value;
-			if (changed && flash_key_ != nullptr) {
-				saveToNVS();
-			}
+			snapshot = value_;
 			xSemaphoreGive(semaphore_);
+		}
+		// Outside the lock. An NVS commit is a flash erase-and-write costing
+		// milliseconds, and holding the mutex across it blocked every reader of
+		// this variable for that whole time -- including tasks that only wanted
+		// to look at it. Two setters racing here could land in NVS in the other
+		// order, so the persisted value can briefly disagree with the live one;
+		// the persisted values are MQTT-driven settings written from one task,
+		// which makes that trade worth taking.
+		if (changed && flash_key_ != nullptr) {
+			saveToNVS(snapshot);
 		}
 		if (changed && onChange_ != nullptr) {
 			onChange_(onChangeData_);
@@ -120,7 +129,7 @@ private:
 		if (err == ESP_ERR_NVS_NOT_FOUND) {
 			// Namespace does not exist yet: first boot, or after an NVS erase.
 			// Seed it with the compiled-in default.
-			saveToNVS();
+			saveToNVS(value_);
 			return;
 		}
 		if (err != ESP_OK) {
@@ -140,12 +149,12 @@ private:
 				// Keep the default rather than reinterpreting the bytes.
 				ESP_LOGW(TAG_, "Stored size mismatch for '%s' (%u stored, %u expected); keeping default",
 						 flash_key_, (unsigned)required_size, (unsigned)sizeof(T));
-				saveToNVS();
+				saveToNVS(value_);
 			} else {
 				value_ = v;
 			}
 		} else if (err == ESP_ERR_NVS_NOT_FOUND) {
-			saveToNVS();
+			saveToNVS(value_);
 		} else {
 			ESP_LOGE(TAG_, "nvs_get_blob('%s') failed: %s", flash_key_, esp_err_to_name(err));
 		}
@@ -154,7 +163,7 @@ private:
 	/**
 	 * @brief Save value to NVS flash storage
 	 */
-	void saveToNVS(void) {
+	void saveToNVS(const T& v) {
 		if (flash_key_ == nullptr) return;
 
 		nvs_handle_t nvs_handle;
@@ -165,7 +174,7 @@ private:
 			return;
 		}
 
-		err = nvs_set_blob(nvs_handle, flash_key_, &value_, sizeof(T));
+		err = nvs_set_blob(nvs_handle, flash_key_, &v, sizeof(T));
 		if (err != ESP_OK) {
 			ESP_LOGE(TAG_, "nvs_set_blob('%s') failed: %s", flash_key_, esp_err_to_name(err));
 			nvs_close(nvs_handle);

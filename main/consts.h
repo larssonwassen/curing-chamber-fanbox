@@ -114,7 +114,6 @@ extern Attributes* attributes;
 
 extern EventGroupHandle_t network_state_event_group;
 extern const int WIFI_CONNECTED_BIT;
-extern const int WIFI_FAIL_BIT;
 extern const int MQTT_CONNECTED_BIT;
 
 
