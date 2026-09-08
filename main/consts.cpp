@@ -5,7 +5,6 @@
 
 EventGroupHandle_t network_state_event_group;
 const int WIFI_CONNECTED_BIT = BIT0;
-const int WIFI_FAIL_BIT = BIT1;
 const int MQTT_CONNECTED_BIT = BIT2;
 
 static const char *TAG = "consts";

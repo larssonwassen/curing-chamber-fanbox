@@ -21,6 +21,7 @@
 #include "esp_now.h"
 #include "esp_crc.h"
 #include "nvs_flash.h"
+#include "esp_timer.h"
 #include "pins.h"
 #include "I2C/I2CBus.h"
 #include "I2C/I2CDevice.h"
@@ -37,8 +38,42 @@
 
 static const char *TAG = "curing-chamber-fanbox";
 
-static const int WIFI_MAXIMUM_RETRY = 5;
-static int s_retry_num = 0;
+// WiFi reconnection backoff.
+//
+// This used to stop after five attempts and set WIFI_FAIL_BIT, which nothing
+// ever read -- so five consecutive disconnects took the device off the network
+// permanently: no telemetry, no shared attributes, and no way to push firmware
+// to it. A router reboot was enough to do it. There is no attempt count now,
+// only a growing delay, because there is no number of failures after which
+// giving up is the right answer for a device sealed in a chamber.
+static const uint32_t WIFI_RETRY_MIN_MS = 1000;
+static const uint32_t WIFI_RETRY_MAX_MS = 60000;
+static uint32_t s_wifi_retry_delay_ms = WIFI_RETRY_MIN_MS;
+static esp_timer_handle_t s_wifi_retry_timer = nullptr;
+
+static void schedule_wifi_retry(void) {
+	if (s_wifi_retry_timer == nullptr) {
+		return;
+	}
+	// Stop first: a disconnect can arrive while a retry is already armed.
+	esp_timer_stop(s_wifi_retry_timer);
+	esp_err_t err = esp_timer_start_once(s_wifi_retry_timer,
+										 (uint64_t)s_wifi_retry_delay_ms * 1000);
+	if (err != ESP_OK) {
+		ESP_LOGE(TAG, "Failed to arm the WiFi retry timer: %s", esp_err_to_name(err));
+		return;
+	}
+	ESP_LOGI(TAG, "WiFi reconnect in %u ms", (unsigned)s_wifi_retry_delay_ms);
+	s_wifi_retry_delay_ms = MIN(s_wifi_retry_delay_ms * 2, WIFI_RETRY_MAX_MS);
+}
+
+static void wifi_retry_cb(void* arg) {
+	esp_err_t err = esp_wifi_connect();
+	if (err != ESP_OK) {
+		ESP_LOGW(TAG, "esp_wifi_connect() failed: %s", esp_err_to_name(err));
+		schedule_wifi_retry();
+	}
+}
 
 TaskHandle_t fan_task_handle = nullptr;
 TaskHandle_t adc_task_handle = nullptr;
@@ -53,15 +88,9 @@ static void wifi_event_handler(void* event_handler_arg, esp_event_base_t event_b
 	} else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
 		ESP_LOGI(TAG, "Disconnected");
 		xEventGroupClearBits(network_state_event_group, WIFI_CONNECTED_BIT);
-		if (s_retry_num < WIFI_MAXIMUM_RETRY) {
-			esp_wifi_connect();
-			s_retry_num++;
-			ESP_LOGI(TAG, "Connect retry");
-		} else {
-			xEventGroupSetBits(network_state_event_group, WIFI_FAIL_BIT);
-		}
+		schedule_wifi_retry();
 	} else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-		s_retry_num = 0;
+		s_wifi_retry_delay_ms = WIFI_RETRY_MIN_MS;
 		xEventGroupSetBits(network_state_event_group, WIFI_CONNECTED_BIT);
 	}
 }
@@ -79,13 +108,26 @@ static void wifi_setup(void)
 	ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
 	ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL));
 
+	const esp_timer_create_args_t retry_timer_args = {
+		.callback = wifi_retry_cb,
+		.arg = nullptr,
+		.dispatch_method = ESP_TIMER_TASK,
+		.name = "wifi_retry",
+		.skip_unhandled_events = true,
+	};
+	ESP_ERROR_CHECK(esp_timer_create(&retry_timer_args, &s_wifi_retry_timer));
+
 	ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
 	wifi_config_t wifi_config = { };
 	// strlcpy, not strcpy: the credentials come from NVS, and sta.ssid /
 	// sta.password are fixed 32- and 64-byte fields.
 	strlcpy((char*)wifi_config.sta.ssid, DeviceConfig::wifiSsid(), sizeof(wifi_config.sta.ssid));
 	strlcpy((char*)wifi_config.sta.password, DeviceConfig::wifiPsk(), sizeof(wifi_config.sta.password));
-	wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA3_PSK;
+	// A minimum, not a requirement: WPA3 sorts above WPA2 in this enum, so a
+	// WPA3-SAE network still associates as WPA3. Pinning it to WPA3_PSK refused
+	// WPA2-only networks outright, which is a hard failure for anyone running
+	// this firmware on a different network than the one it was written on.
+	wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
 	wifi_config.sta.pmf_cfg.capable = true;
 	wifi_config.sta.pmf_cfg.required = false;
 
@@ -166,6 +208,28 @@ void fan_task(void* arg) {
 }
 
 static SHT31 climateSensor; // SHT31 temperature and humidity sensor
+
+// When the last SHT31 read succeeded, in tick-derived milliseconds. Written
+// only by climate_sensor_task and read only by control_loop_task; a 32-bit
+// aligned load/store is atomic on this target, so no lock is warranted. The
+// counter wraps every ~49 days and unsigned subtraction stays correct across
+// the wrap.
+static volatile uint32_t s_climate_last_ok_ms = 0;
+static volatile bool s_climate_ever_ok = false;
+
+// Thirty consecutive failed reads at one per second. Long enough to ride out a
+// transient bus error, short enough that the fan is not left running on a
+// number from several minutes ago.
+static const uint32_t CLIMATE_STALE_MS = 30000;
+
+/// True when no successful climate reading is recent enough to regulate on.
+static bool climate_is_stale(void) {
+	if (!s_climate_ever_ok) {
+		return true; // Nothing has ever been read; 0.0%% is not a measurement.
+	}
+	uint32_t now = (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount());
+	return (uint32_t)(now - s_climate_last_ok_ms) > CLIMATE_STALE_MS;
+}
 void climate_sensor_task(void* arg) {
 	const int max_retries = 3;
 	int retries = 0;
@@ -191,13 +255,15 @@ void climate_sensor_task(void* arg) {
 	float temperature = 0.0f, humidity = 0.0f, lastTemperature = 0.0f, lastHumidity = 0.0f;
 	while (true) {
 		if (climateSensor.readTempHumidity(&temperature, &humidity)) {
-			if (abs(lastTemperature - temperature) >= 0.05f || abs(lastHumidity - humidity) >= 0.5f) {
+			if (fabsf(lastTemperature - temperature) >= 0.05f || fabsf(lastHumidity - humidity) >= 0.5f) {
 				ESP_LOGD(TAG, "%.2f°C %.2f%%", temperature, humidity);
 				lastTemperature = temperature;
 				lastHumidity = humidity;
 			}
 			telemetry->temperature.set(temperature);
 			telemetry->humidity.set(humidity);
+			s_climate_last_ok_ms = (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount());
+			s_climate_ever_ok = true;
 		} else {
 			ESP_LOGE(TAG, "Failed to read climate sensor data");
 		}
@@ -297,7 +363,7 @@ static void adc_task(void* arg) {
 				}
 				telemetry->fanDuty.set(dutyCycle);
 
-				vTaskDelay(25);
+				vTaskDelay(pdMS_TO_TICKS(250));
 			} else if (ret == ESP_ERR_TIMEOUT) {
 				// Not an error: this is how the inner loop ends. The DMA buffer
 				// has been drained, so go back to waiting for the conversion-done
@@ -317,6 +383,11 @@ static void adc_task(void* arg) {
 static bool publish_json(const char* topic, JsonBuilder* jb, int qos = 0, int retain = 0) {
 	if (!jb->finalize()) {
 		ESP_LOGE(TAG, "Failed to finalize JSON message. (size=%u)", (unsigned)jb->size());
+		// Reset here too. The builder is long-lived and shared across every
+		// publish from this task; leaving it in the failed state meant one bad
+		// message poisoned all later ones, and the task retried forever against
+		// a builder that could never succeed again.
+		jb->reset();
 		return false;
 	}
 	size_t size = jb->size();
@@ -334,7 +405,10 @@ static bool publish_telemetry(JsonBuilder* jb) {
 	jb->add("fan_duty_cycle", telemetry->fanDuty.get());
 	jb->add("fan_rpm", telemetry->fanRPM.get());
 	jb->add("temperature", (double)(telemetry->temperature.get()), 1);
-	jb->add("humidity", (double)(telemetry->humidity.get()), 0);
+	// One decimal, like temperature. At zero this rounded the primary
+	// controlled variable to whole percent -- in exactly the graph you would
+	// use to see whether the control loop is behaving.
+	jb->add("humidity", (double)(telemetry->humidity.get()), 1);
 	jb->endObject();
 	return publish_json("v1/devices/me/telemetry", jb);
 }
@@ -370,10 +444,13 @@ static void publish_attributes_task(void* arg) {
 		publish_attributes(&jb);
 		while (true) {
 			if (attributes->waitForChange(pdMS_TO_TICKS(10000))) {
+				// Clear before publishing, not after: a value changing while
+				// the publish is in flight used to have its flag wiped by this
+				// call, so the new value waited for the next unrelated change.
+				attributes->clearChanged();
 				if (!publish_attributes(&jb)) {
 					break;
 				}
-				attributes->clearChanged();
 
 				// To reduce spamming
 				vTaskDelay(pdMS_TO_TICKS(5000));
@@ -383,11 +460,34 @@ static void publish_attributes_task(void* arg) {
 	}
 }
 
+// Latches the stale-reading warning so it is logged on entry and exit rather
+// than every five seconds for as long as the sensor is down.
+static bool s_climate_stale_logged = false;
+
 static void control_loop_task(void* arg) {
 	while (true) {
 		bool fanEnabled = attributes->fanEnabled.get();
 		bool newFanEnabled = fanEnabled;
-		if (shared_attributes->ctrlLoopEnabled.get()) {
+		// Read once: an attribute update landing between two reads would send
+		// this iteration down a different branch than it started in.
+		const bool ctrlLoopEnabled = shared_attributes->ctrlLoopEnabled.get();
+		if (ctrlLoopEnabled && climate_is_stale()) {
+			// The fan raises humidity, so the failure that matters is leaving it
+			// running against a number that stopped updating -- that humidifies
+			// blind, and over-humidifying a curing chamber grows mould. Holding
+			// it off is the recoverable direction: the chamber dries out slowly
+			// and visibly instead.
+			newFanEnabled = false;
+			if (!s_climate_stale_logged) {
+				ESP_LOGW(TAG, "No climate reading for over %u s; holding the fan off",
+						 (unsigned)(CLIMATE_STALE_MS / 1000));
+				s_climate_stale_logged = true;
+			}
+		} else if (ctrlLoopEnabled) {
+			if (s_climate_stale_logged) {
+				ESP_LOGI(TAG, "Climate readings are current again; resuming control");
+				s_climate_stale_logged = false;
+			}
 			float humidity = telemetry->humidity.get();
 			float humiditySetpoint = shared_attributes->humiditySetpoint.get();
 			float humidityOvershootLimit = shared_attributes->humidityOvershootLimit.get();
@@ -481,8 +581,15 @@ extern "C" void app_main(void) {
 
 	// Initialize I2C bus
 	if (!I2CBus0.begin()) {
-		ESP_LOGE(TAG, "Failed to initialize I2C bus");
-		return;
+		// Returning from app_main here left WiFi and MQTT running with not a
+		// single task created: the device looked alive, reported nothing, and
+		// controlled nothing. Without the bus there is no fan and no sensor, so
+		// say so as loudly as an unprovisioned device does.
+		while (true) {
+			ESP_LOGE(TAG, "Failed to initialize the I2C bus. The fan controller and");
+			ESP_LOGE(TAG, "climate sensor are both unreachable; not starting any task.");
+			vTaskDelay(pdMS_TO_TICKS(10000));
+		}
 	}
 	ESP_LOGI(TAG, "I2C bus initialized successfully");
 

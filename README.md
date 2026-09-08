@@ -3,11 +3,20 @@
 Firmware for an ESP32-S3 that regulates humidity inside a curing chamber by driving a
 PWM fan, and reports to a [ThingsBoard](https://thingsboard.io/) instance over MQTT.
 
-A humidity setpoint with separate overshoot/undershoot limits gives the control loop
-hysteresis, so the fan is not cycled continuously around the target. Fan speed itself is
-set by a panel potentiometer read on the ADC; the control loop decides only whether the
-fan runs. Both the setpoint and the manual override are adjustable remotely as
-ThingsBoard shared attributes.
+**The fan raises humidity.** Running it pulls humid air into the chamber, so the control
+loop switches it *on* when the chamber is too dry and *off* once the target is reached --
+the opposite of a venting fan, and worth stating plainly because the thresholds read
+backwards otherwise.
+
+A humidity setpoint with separate overshoot/undershoot limits gives the loop hysteresis,
+so the fan is not cycled continuously around the target. Fan speed itself is set by a
+panel potentiometer read on the ADC; the control loop decides only whether the fan runs.
+Both the setpoint and the manual override are adjustable remotely as ThingsBoard shared
+attributes.
+
+If the climate sensor stops responding, the loop holds the fan off rather than
+regulating on a reading that has stopped updating. Humidifying blind is the direction
+that grows mould; drying out is slower and visible.
 
 Commit `57b09f3` is the as-built reference snapshot: the firmware that ran the chamber
 before any of this rework, kept as a baseline. Everything since builds against
@@ -74,8 +83,8 @@ is *not* persisted — see [Flash wear](#flash-wear):
 |---|---|---|
 | `ctrl_loop_enabled` | `true` | Automatic humidity control; when false, `fan_enabled` is obeyed directly |
 | `humidity_setpoint` | `75.0` | Target relative humidity, % |
-| `humidity_overshoot_limit` | `5.0` | Fan switches on above setpoint + this |
-| `humidity_undershoot_limit` | `5.0` | Fan switches off below setpoint − this |
+| `humidity_overshoot_limit` | `5.0` | Fan switches **off** at setpoint + this |
+| `humidity_undershoot_limit` | `5.0` | Fan switches **on** at setpoint − this |
 | `fan_enabled` | `true` | Manual fan state, used when the control loop is off |
 | `uart_log_level` | `DEBUG` | Console log level |
 | `streamer_log_level` | `INFO` | Level threshold for logs shipped over MQTT |
