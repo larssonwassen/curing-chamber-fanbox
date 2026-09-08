@@ -10,7 +10,7 @@ MAIN := ../../main
 CXXFLAGS := -std=c++17 -g -O1 -Wall -Wextra -Wno-unused-parameter \
             -fsanitize=address,undefined -fno-omit-frame-pointer
 
-TESTS := test_json_parser test_util
+TESTS := test_json_parser test_util test_json_builder
 
 .PHONY: all clean
 all: $(TESTS)
@@ -21,6 +21,10 @@ test_json_parser: test_json_parser.cpp $(MAIN)/JsonParser/JsonParser.cpp
 
 test_util: test_util.cpp $(MAIN)/util.cpp
 	$(CXX) $(CXXFLAGS) -I$(MAIN) $^ -o $@
+
+# stubs/ supplies a minimal esp_log.h; JsonBuilder.h needs only esp_log_level_t.
+test_json_builder: test_json_builder.cpp $(MAIN)/JsonBuilder/JsonBuilder.cpp
+	$(CXX) $(CXXFLAGS) -I$(MAIN)/JsonBuilder -Istubs $^ -o $@
 
 clean:
 	rm -rf $(TESTS) *.dSYM

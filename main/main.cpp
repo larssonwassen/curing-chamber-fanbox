@@ -99,7 +99,11 @@ static void wifi_setup(void)
 	ESP_ERROR_CHECK(esp_wifi_start());
 }
 
-static EMC2101 fan; // Declare outside the function or make it static within the function
+// Owned exclusively by fan_task. Nothing else touches it: the EMC2101 driver
+// holds no lock, and every read is a multi-register I2C transaction that a
+// concurrent write would interleave with. Other tasks read telemetry->fanRPM,
+// which fan_task publishes every 100 ms.
+static EMC2101 fan;
 void fan_task(void* arg) {
 	const int max_retries = 3;
 	int retries = 0;
@@ -399,7 +403,9 @@ static void control_loop_task(void* arg) {
 
 		gpio_set_level(D2, newFanEnabled ? 1 : 0);
 		attributes->fanEnabled.set(newFanEnabled);
-		attributes->fanRunning.set(fan.getFanRPM() > 0);
+		// fan_task owns the EMC2101; take its published reading rather than
+		// issuing a concurrent I2C transaction from this task.
+		attributes->fanRunning.set(telemetry->fanRPM.get() > 0);
 		vTaskDelay(pdMS_TO_TICKS(5000));
 	}
 }
@@ -429,7 +435,10 @@ extern "C" void app_main(void) {
 	bool fanEnabled = shared_attributes->fanEnabled.get();
 	ESP_ERROR_CHECK(gpio_set_level(D2, fanEnabled ? 1 : 0));
 	attributes->fanEnabled.set(fanEnabled);
-	attributes->fanRunning.set(fan.getFanRPM() > 0);
+	// The I2C bus is not up yet and fan_task has not run, so the EMC2101 cannot
+	// be queried here -- the old fan.getFanRPM() call only ever returned 0 after
+	// logging a warning. Report not-running until fan_task publishes a reading.
+	attributes->fanRunning.set(false);
 
 	
 	log_streamer_setup();
