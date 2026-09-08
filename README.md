@@ -115,5 +115,4 @@ Documented honestly, since this snapshot is a baseline rather than a finished pr
 
 ## License
 
-Not yet chosen. Until a license file is added, no permissions are granted beyond
-viewing this source.
+[MIT](LICENSE)
