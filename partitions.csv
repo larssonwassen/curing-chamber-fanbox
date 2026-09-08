@@ -1,0 +1,24 @@
+# Partition table for the 16 MB flash on this ESP32-S3 module.
+#
+# The stock single-app layout declared 2 MB of flash and a 1 MB factory
+# partition, leaving 14 MB unaddressable and no room for OTA. This replaces it
+# with two 3 MB OTA slots.
+#
+# 0x9000-0xFFFF is deliberately left unmapped. That is where the original 24 KB
+# NVS partition lived, and it has been cycled to an active page sequence number
+# of roughly 1,017,540 -- about 200,000 erase cycles per sector against a rated
+# ~100,000. Nothing bootloader-critical belongs on the most worn sectors in the
+# device, so NVS moves to fresh flash above the app slots and the old region is
+# left out of the table entirely.
+#
+# Moving NVS discards everything the old partition held. Shared attributes fall
+# back to their compiled-in defaults and are re-pushed by the broker on the next
+# attributes request; the provisioned credentials must be written to the new
+# offset (see provisioning/README.md).
+#
+# Name,     Type, SubType, Offset,   Size,     Flags
+ota_0,      app,  ota_0,   0x10000,  0x300000,
+ota_1,      app,  ota_1,   0x310000, 0x300000,
+otadata,    data, ota,     0x610000, 0x2000,
+phy_init,   data, phy,     0x612000, 0x1000,
+nvs,        data, nvs,     0x613000, 0x40000,

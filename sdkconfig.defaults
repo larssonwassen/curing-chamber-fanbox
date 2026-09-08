@@ -34,3 +34,19 @@ CONFIG_SPIRAM_MODE_OCT=y
 # switching to the v2 format would break that parsing silently, with no build
 # error. v1 is still the IDF 6 default, but that is not something to rely on.
 CONFIG_LOG_VERSION_1=y
+
+# Custom 16 MB partition table with two 3 MB OTA slots. See partitions.csv for
+# why the original NVS region at 0x9000 is left unmapped.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Boot a freshly written OTA image in the pending-verify state and roll back to
+# the previous slot unless the app calls esp_ota_mark_app_valid_cancel_rollback().
+# The device lives inside a sealed curing chamber, so an image that cannot reach
+# the network has to undo itself rather than wait to be recovered over USB.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# ThingsBoard sends shared attributes and OTA metadata as single JSON payloads
+# that exceed the 1 KB default. mqtt.cpp reassembles fragments regardless, but a
+# buffer that fits the common case avoids the churn.
+CONFIG_MQTT_BUFFER_SIZE=4096
