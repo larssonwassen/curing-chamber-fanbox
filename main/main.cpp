@@ -479,8 +479,14 @@ static void control_loop_task(void* arg) {
 			// and visibly instead.
 			newFanEnabled = false;
 			if (!s_climate_stale_logged) {
-				ESP_LOGW(TAG, "No climate reading for over %u s; holding the fan off",
-						 (unsigned)(CLIMATE_STALE_MS / 1000));
+				if (s_climate_ever_ok) {
+					ESP_LOGW(TAG, "No climate reading for over %u s; holding the fan off",
+							 (unsigned)(CLIMATE_STALE_MS / 1000));
+				} else {
+					// Normal for the first seconds after boot: the loop runs
+					// before climate_sensor_task has completed a measurement.
+					ESP_LOGI(TAG, "No climate reading yet; holding the fan off");
+				}
 				s_climate_stale_logged = true;
 			}
 		} else if (ctrlLoopEnabled) {
