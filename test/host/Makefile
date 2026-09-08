@@ -1,0 +1,26 @@
+# Host tests for the target-independent parsing helpers.
+#
+#   make -C test/host
+#
+# These build the real main/ sources against a host compiler with ASan and
+# UBSan. They cover the code that parses untrusted input -- MQTT payloads and
+# log text -- where a bounds bug is a memory-safety bug, not a formatting one.
+
+MAIN := ../../main
+CXXFLAGS := -std=c++17 -g -O1 -Wall -Wextra -Wno-unused-parameter \
+            -fsanitize=address,undefined -fno-omit-frame-pointer
+
+TESTS := test_json_parser test_util
+
+.PHONY: all clean
+all: $(TESTS)
+	@for t in $(TESTS); do echo "== $$t"; ./$$t || exit 1; done
+
+test_json_parser: test_json_parser.cpp $(MAIN)/JsonParser/JsonParser.cpp
+	$(CXX) $(CXXFLAGS) -I$(MAIN)/JsonParser $^ -o $@
+
+test_util: test_util.cpp $(MAIN)/util.cpp
+	$(CXX) $(CXXFLAGS) -I$(MAIN) $^ -o $@
+
+clean:
+	rm -rf $(TESTS) *.dSYM

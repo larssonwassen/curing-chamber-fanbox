@@ -1,4 +1,7 @@
 #include "BusIO_Register.h"
+#include "esp_log.h"
+
+static const char* TAG = "BusIO";
 
 /*!
  *    @brief  Create a register we access over an I2C Device (which defines the
@@ -73,22 +76,39 @@ bool BusIO_Register::write(uint32_t value, uint8_t numbytes) {
  *    @return Returns 0xFFFFFFFF on failure, value otherwise
  */
 uint32_t BusIO_Register::read(void) {
-  if (!read(_buffer, _width)) {
+  uint32_t value = 0;
+  if (!read(&value)) {
     return (uint32_t)-1;
   }
+  return value;
+}
 
-  uint32_t value = 0;
+/*!
+ *    @brief  Read data from the register location, reporting failure separately
+ * from the value. The uint32_t-returning overload signals failure with
+ * 0xFFFFFFFF, which a caller cannot distinguish from a register that genuinely
+ * reads all ones.
+ *    @param  value Pointer to the uint32_t to read into; untouched on failure
+ *    @return True on a successful read
+ */
+bool BusIO_Register::read(uint32_t *value) {
+  if (!read(_buffer, _width)) {
+    return false;
+  }
+
+  uint32_t v = 0;
 
   for (int i = 0; i < _width; i++) {
-    value <<= 8;
+    v <<= 8;
     if (_byteorder == LSBFIRST) {
-      value |= _buffer[_width - i - 1];
+      v |= _buffer[_width - i - 1];
     } else {
-      value |= _buffer[i];
+      v |= _buffer[i];
     }
   }
 
-  return value;
+  *value = v;
+  return true;
 }
 
 /*!
@@ -170,7 +190,13 @@ BusIO_RegisterBits::BusIO_RegisterBits(
  *    @return  data The 4 bytes to read
  */
 uint32_t BusIO_RegisterBits::read(void) {
-  uint32_t val = _register->read();
+  uint32_t val = 0;
+  if (!_register->read(&val)) {
+    // The signature has no way to report this, so at least make it visible
+    // rather than returning shifted garbage silently.
+    ESP_LOGE(TAG, "Read failed for register bits (shift=%u bits=%u)", _shift, _bits);
+    return 0;
+  }
   val >>= _shift;
   return val & ((1 << (_bits)) - 1);
 }
@@ -181,7 +207,15 @@ uint32_t BusIO_RegisterBits::read(void) {
  *    @return True on successful write
  */
 bool BusIO_RegisterBits::write(uint32_t data) {
-  uint32_t val = _register->read();
+  // Read-modify-write, so a failed read must abort the write. Using the
+  // uint32_t-returning read() here meant a failed read produced 0xFFFFFFFF and
+  // the untouched bits were then written back as all ones -- on the EMC2101
+  // that writes 0xFF into a config register the device is actively using.
+  uint32_t val = 0;
+  if (!_register->read(&val)) {
+    ESP_LOGE(TAG, "Read-modify-write aborted: read failed (shift=%u bits=%u)", _shift, _bits);
+    return false;
+  }
 
   // mask off the data before writing
   uint32_t mask = (1 << (_bits)) - 1;

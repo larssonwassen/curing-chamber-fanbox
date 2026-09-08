@@ -30,8 +30,10 @@ public:
     // Construct with your own node pool
     JsonParser(Node* pool, int pool_cap);
 
-    // Parse a JSON document in-place. 'json' must be mutable and null-terminated
-    // (len optional; if 0, it will be computed with strlen()).
+    // Parse a JSON document in-place. 'json' must be mutable: strings are
+    // unescaped and null-terminated where they sit. Nothing is read or written
+    // past json[len-1], so the buffer need not be null-terminated -- but if len
+    // is 0 it is computed with strlen(), which does require one.
     // Returns index of root node (>=0) on success, or -1 on error.
     int parse(char* json, size_t len = 0);
 

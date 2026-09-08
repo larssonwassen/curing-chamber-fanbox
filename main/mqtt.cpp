@@ -6,6 +6,7 @@
 #include "JsonParser/JsonParser.h"
 #include "JsonBuilder/JsonBuilder.h"
 #include "consts.h"
+#include <string.h>
 
 static const char *TAG = "mqtt";
 
@@ -117,6 +118,64 @@ void subscribe(const char* topic) {
 	}
 }
 
+// Reassembly state for MQTT_EVENT_DATA. Only ever touched from the MQTT client
+// task, which delivers events serially, so no locking is needed.
+static char rx_topic[128];
+static char rx_payload[4096];
+static size_t rx_len = 0;
+static bool rx_overflow = false;
+
+static bool topic_starts_with(const char* topic, const char* prefix) {
+	return strncmp(topic, prefix, strlen(prefix)) == 0;
+}
+
+/**
+ * @brief Dispatch one fully reassembled MQTT message.
+ *
+ * @param topic Null-terminated topic the message arrived on.
+ * @param data  Mutable payload buffer; JsonParser unescapes strings in place.
+ * @param len   Payload length. Not null-terminated.
+ */
+static void handle_mqtt_message(const char* topic, char* data, size_t len) {
+	// Dispatch on the topic before touching the payload. Every subscription
+	// today carries JSON, but the OTA chunk topics are raw binary, and feeding
+	// those to the JSON parser produces nothing but parse errors.
+	if (!topic_starts_with(topic, "v1/devices/me/attributes")) {
+		ESP_LOGD(TAG, "Ignoring message on unhandled topic '%s'", topic);
+		return;
+	}
+
+	ESP_LOGD(TAG, "Attributes message on '%s': %.*s", topic, (int)MIN(len, (size_t)256), data);
+
+	static JsonParser::Node nodes[32];
+	JsonParser jp(nodes, 32);
+
+	int root = jp.parse(data, len);
+	if (root < 0) {
+		ESP_LOGE(TAG, "Parse error: %s", jp.last_error());
+		return;
+	}
+	int dataRoot = root;
+	int shared = jp.find(root, "shared");
+	if (shared >= 0) {
+		dataRoot = shared;
+	}
+	// Handle integer attributes
+	handle_int_attribute(jp, dataRoot, "uart_log_level", shared_attributes->uartLogLevel);
+	handle_int_attribute(jp, dataRoot, "streamer_log_level", shared_attributes->streamerLogLevel);
+
+	// Handle boolean attributes
+	handle_bool_attribute(jp, dataRoot, "fan_enabled", shared_attributes->fanEnabled);
+	handle_bool_attribute(jp, dataRoot, "ctrl_loop_enabled", shared_attributes->ctrlLoopEnabled);
+
+	// Handle floating point attributes
+	handle_number_attribute(jp, dataRoot, "humidity_setpoint", shared_attributes->humiditySetpoint);
+	handle_number_attribute(jp, dataRoot, "humidity_overshoot_limit", shared_attributes->humidityOvershootLimit);
+	handle_number_attribute(jp, dataRoot, "humidity_undershoot_limit", shared_attributes->humidityUndershootLimit);
+
+	esp_log_level_set("*", shared_attributes->uartLogLevel.get());
+}
+
 static void mqtt_event_handler(void* event_handler_arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
 {
 	esp_mqtt_event_t* event = (esp_mqtt_event_t*)event_data;
@@ -143,34 +202,51 @@ static void mqtt_event_handler(void* event_handler_arg, esp_event_base_t event_b
 			ESP_LOGD(TAG, "PUBLISHED, msg_id=%d", event->msg_id);
 			break;
 		case MQTT_EVENT_DATA: {
-			ESP_LOGI(TAG, "DATA (topic=%.*s, data=%.*s)", event->topic_len, event->topic, event->data_len, event->data);
-			static JsonParser::Node nodes[32];
-			JsonParser jp(nodes, 32);
+			// A payload larger than the client's receive buffer is delivered as
+			// a sequence of MQTT_EVENT_DATA events carrying successive slices.
+			// Only the first carries the topic; the rest are continuations
+			// identified by current_data_offset. Parsing each slice on its own
+			// fails, so reassemble before dispatching.
+			if (event->current_data_offset == 0) {
+				rx_len = 0;
+				rx_overflow = false;
 
-			int root = jp.parse(event->data, event->data_len);
-			if (root < 0) {
-				ESP_LOGE(TAG, "Parse error: %s", jp.last_error());
+				size_t topic_len = MIN((size_t)event->topic_len, sizeof(rx_topic) - 1);
+				if (event->topic != nullptr && topic_len > 0) {
+					memcpy(rx_topic, event->topic, topic_len);
+				}
+				rx_topic[topic_len] = '\0';
+				if ((size_t)event->topic_len >= sizeof(rx_topic)) {
+					ESP_LOGW(TAG, "Topic truncated to %u of %d bytes",
+							 (unsigned)(sizeof(rx_topic) - 1), event->topic_len);
+				}
+			}
+
+			if (event->data_len > 0) {
+				// Copy rather than parse in place: JsonParser unescapes strings
+				// by writing into the buffer, and event->data points into the
+				// MQTT client's own receive buffer, which is not ours to modify.
+				size_t n = MIN((size_t)event->data_len, sizeof(rx_payload) - rx_len);
+				memcpy(rx_payload + rx_len, event->data, n);
+				rx_len += n;
+				if (n < (size_t)event->data_len) {
+					rx_overflow = true;
+				}
+			}
+
+			if (event->current_data_offset + event->data_len < event->total_data_len) {
+				break; // More fragments to come.
+			}
+
+			if (rx_overflow) {
+				ESP_LOGE(TAG, "Payload of %d bytes exceeds the %u byte reassembly buffer; dropped",
+						 event->total_data_len, (unsigned)sizeof(rx_payload));
+				rx_len = 0;
 				break;
 			}
-			int dataRoot = root;
-			int shared = jp.find(root, "shared");
-			if (shared >= 0) {
-				dataRoot = shared;
-			}
-			// Handle integer attributes
-			handle_int_attribute(jp, dataRoot, "uart_log_level", shared_attributes->uartLogLevel);
-			handle_int_attribute(jp, dataRoot, "streamer_log_level", shared_attributes->streamerLogLevel);
 
-			// Handle boolean attributes
-			handle_bool_attribute(jp, dataRoot, "fan_enabled", shared_attributes->fanEnabled);
-			handle_bool_attribute(jp, dataRoot, "ctrl_loop_enabled", shared_attributes->ctrlLoopEnabled);
-
-			// Handle floating point attributes
-			handle_number_attribute(jp, dataRoot, "humidity_setpoint", shared_attributes->humiditySetpoint);
-			handle_number_attribute(jp, dataRoot, "humidity_overshoot_limit", shared_attributes->humidityOvershootLimit);
-			handle_number_attribute(jp, dataRoot, "humidity_undershoot_limit", shared_attributes->humidityUndershootLimit);
-
-			esp_log_level_set("*", shared_attributes->uartLogLevel.get());
+			handle_mqtt_message(rx_topic, rx_payload, rx_len);
+			rx_len = 0;
 			break;
 		}
 		case MQTT_EVENT_ERROR: {
@@ -184,7 +260,7 @@ static void mqtt_event_handler(void* event_handler_arg, esp_event_base_t event_b
 					break;
 				case MQTT_ERROR_TYPE_TCP_TRANSPORT: {
 					errorType = "TCP_TRANSPORT";
-					sprintf(details_buff, "-> esp_tls_last_esp_err=%d esp_tls_stack_err=%d esp_tls_cert_verify_flags=%d", eh->esp_tls_last_esp_err, eh->esp_tls_stack_err, eh->esp_tls_cert_verify_flags);
+					snprintf(details_buff, sizeof(details_buff), "-> esp_tls_last_esp_err=%d esp_tls_stack_err=%d esp_tls_cert_verify_flags=%d", eh->esp_tls_last_esp_err, eh->esp_tls_stack_err, eh->esp_tls_cert_verify_flags);
 					break;
 				}
 				case MQTT_ERROR_TYPE_CONNECTION_REFUSED: {
@@ -198,7 +274,7 @@ static void mqtt_event_handler(void* event_handler_arg, esp_event_base_t event_b
 						case MQTT_CONNECTION_REFUSE_BAD_USERNAME: retCode = "CONNECTION_REFUSE_BAD_USERNAME"; break;
 						case MQTT_CONNECTION_REFUSE_NOT_AUTHORIZED: retCode = "CONNECTION_REFUSE_NOT_AUTHORIZED"; break;
 					}
-					sprintf(details_buff, "-> retCode=%s", retCode);
+					snprintf(details_buff, sizeof(details_buff), "-> retCode=%s", retCode);
 					break;
 				}
 				case MQTT_ERROR_TYPE_SUBSCRIBE_FAILED:

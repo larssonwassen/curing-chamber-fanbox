@@ -9,3 +9,8 @@ managed_components/
 # constantly, and is where credentials would otherwise end up committed.
 sdkconfig
 sdkconfig.old
+
+# Host test binaries (test/host/Makefile)
+test/host/test_*
+!test/host/test_*.cpp
+*.dSYM/

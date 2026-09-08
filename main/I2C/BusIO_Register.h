@@ -20,6 +20,7 @@ public:
   bool read(uint8_t *buffer, uint8_t len);
   bool read(uint8_t *value);
   bool read(uint16_t *value);
+  bool read(uint32_t *value);
   uint32_t read(void);
   uint32_t readCached(void);
   bool write(uint8_t *buffer, uint8_t len);
