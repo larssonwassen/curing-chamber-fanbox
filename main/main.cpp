@@ -26,7 +26,7 @@
 #include "I2C/I2CDevice.h"
 #include "EMC2101/EMC2101.h"
 #include "SHT31/SHT31.h"
-#include "JSONBuilder/JSONBuilder.h"
+#include "JsonBuilder/JsonBuilder.h"
 #include "ram_info.h"
 #include "consts.h"
 #include "log_streamer.h"
@@ -227,17 +227,20 @@ static void adc_task(void* arg) {
 	adc_continuous_handle_t handle = NULL;
 	ESP_ERROR_CHECK(adc_continuous_new_handle(&adc_config, &handle));
 
-	adc_continuous_config_t dig_cfg;
-	dig_cfg.pattern_num = 1;
-	dig_cfg.sample_freq_hz = 20 * 1000;
-	dig_cfg.conv_mode = ADC_CONV_SINGLE_UNIT_1;
-	dig_cfg.format = ADC_DIGI_OUTPUT_FORMAT_TYPE2;
-
-	adc_digi_pattern_config_t adc_pattern[1];
+	// Zero-init: these config structs gain fields between IDF releases, and any
+	// field left unset would otherwise carry stack garbage into the driver.
+	// `format` is deprecated as of IDF 6 -- the driver selects the only output
+	// format the target supports (TYPE2 on the ESP32-S3), so it is no longer set.
+	adc_digi_pattern_config_t adc_pattern[1] = {};
 	adc_pattern[0].atten = ADC_ATTEN_DB_12;
 	adc_pattern[0].channel = ADC_CHANNEL_0;
 	adc_pattern[0].unit = ADC_UNIT_1;
 	adc_pattern[0].bit_width = 12;
+
+	adc_continuous_config_t dig_cfg = {};
+	dig_cfg.pattern_num = 1;
+	dig_cfg.sample_freq_hz = 20 * 1000;
+	dig_cfg.conv_mode = ADC_CONV_SINGLE_UNIT_1;
 	dig_cfg.adc_pattern = adc_pattern;
 	ESP_ERROR_CHECK(adc_continuous_config(handle, &dig_cfg));
 

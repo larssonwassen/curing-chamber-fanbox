@@ -1,5 +1,6 @@
 #include "JsonParser.h"
 #include <string.h>
+#include <stdlib.h>   // strtod
 #include <stdio.h>
 #include <ctype.h>
 #include <climits>

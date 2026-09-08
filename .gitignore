@@ -1,1 +1,11 @@
+# ESP-IDF build output
 build/
+
+# Fetched by the IDF Component Manager from main/idf_component.yml.
+# dependencies.lock is committed so builds are reproducible.
+managed_components/
+
+# Generated from sdkconfig.defaults by the build. Machine-specific, churns
+# constantly, and is where credentials would otherwise end up committed.
+sdkconfig
+sdkconfig.old

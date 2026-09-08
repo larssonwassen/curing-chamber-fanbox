@@ -1,0 +1,36 @@
+# This file was generated using idf.py save-defconfig or menuconfig [D] key. It can be edited manually.
+# Espressif IoT Development Framework (ESP-IDF) 6.0.2 Project Minimal Configuration
+#
+# default:
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_COMPILER_ORPHAN_SECTIONS_PLACE=y
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=512
+CONFIG_FATFS_LFN_NONE=y
+CONFIG_LOG_DEFAULT_LEVEL_WARN=y
+CONFIG_LOG_MAXIMUM_LEVEL_VERBOSE=y
+CONFIG_LOG_COLORS=y
+CONFIG_LWIP_IPV6=n
+CONFIG_MBEDTLS_THREADING_C=n
+CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE=y
+CONFIG_MBEDTLS_ECP_FIXED_POINT_OPTIM=y
+CONFIG_MBEDTLS_LARGE_KEY_SOFTWARE_MPI=n
+CONFIG_ESP_PROTOCOMM_SUPPORT_SECURITY_VERSION_0=y
+CONFIG_ESP_PROTOCOMM_SUPPORT_SECURITY_VERSION_1=y
+CONFIG_VFS_SUPPORT_TERMIOS=y
+
+# --- Project-specific settings (added during the IDF 5.3 -> 6.0 migration) ---
+
+# The module carries 16 MB of flash (Winbond ef:4018), not the 2 MB the project
+# previously declared. Everything above 0x110000 was unreachable as a result.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# The module also carries 8 MB of embedded PSRAM (ESP32-S3R8, octal) which was
+# never enabled, so heap_caps reported a PSRAM total of zero.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+
+# Pin log format v1 explicitly. log_streamer.cpp intercepts esp_log output and
+# parses the human-readable "I (56) tag: msg" form by hand in parse_log_line();
+# switching to the v2 format would break that parsing silently, with no build
+# error. v1 is still the IDF 6 default, but that is not something to rely on.
+CONFIG_LOG_VERSION_1=y

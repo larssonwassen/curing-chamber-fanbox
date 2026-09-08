@@ -1,5 +1,6 @@
 #include "mqtt.h"
 #include "esp_log.h"
+#include <type_traits>   // std::remove_reference
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "JsonParser/JsonParser.h"
