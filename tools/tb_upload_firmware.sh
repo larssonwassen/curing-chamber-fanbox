@@ -14,6 +14,14 @@
 # device compares against: OtaUpdater ignores an announcement whose fw_title is
 # not its own esp_app_desc_t project name.
 #
+# The tag is ThingsBoard's own label for a package, and it is set here for one
+# reason: ThingsBoard writes target_fw_tag on the device when a package is
+# assigned, and a package without a tag leaves whatever was written last time
+# in place. The device never reads it, so a stale value breaks nothing -- it
+# just sits on the device page disagreeing with target_fw_version, which is
+# worth avoiding on a field somebody might check while deciding whether an
+# update landed.
+#
 # This uploads only. It deliberately does not assign the package to anything --
 # assignment is what starts an update on a live device, and that should be a
 # person's decision, made while looking at the device.
@@ -130,6 +138,7 @@ PACKAGE_ID="$(
 		'{
 			title: $title,
 			version: $version,
+			tag: ($title + " " + $version),
 			type: "FIRMWARE",
 			deviceProfileId: { entityType: "DEVICE_PROFILE", id: $profile }
 		}' |

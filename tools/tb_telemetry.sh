@@ -131,7 +131,9 @@ fetch_series() {
 	local hours="${1:-24}" agg_s="${2:-}"
 	local end start interval agg
 	end="$(now_ms)"
-	start=$(( end - hours * 3600 * 1000 ))
+	# Fractional hours are useful ("the last 20 minutes" is 0.33), and bash
+	# cannot multiply them, so the window is computed in awk.
+	start="$(awk -v e="$end" -v h="$hours" 'BEGIN { printf "%d", e - h * 3600000 }')"
 	if [ -n "$agg_s" ]; then
 		interval=$(( agg_s * 1000 ))
 		agg="AVG"
