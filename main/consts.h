@@ -121,7 +121,7 @@ public:
 		ventIntervalHours(12.0, "vih", onChange, this),
 		ventFirstHourLocal(6, "vfh", onChange, this),
 		ventBurstSeconds(90.0, "vbs", onChange, this),
-		ventSettleMinutes(20.0, "vsm", onChange, this),
+		ventSettleMinutes(1.5, "vsm", onChange, this),
 		ventMaxDeferMinutes(360.0, "vmd", onChange, this),
 		// Matches what the default schedule already delivers (2 x 90 s), so it
 		// is inert until raised.

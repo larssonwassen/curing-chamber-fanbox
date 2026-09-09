@@ -99,10 +99,12 @@ sub-zero metal is the mechanism that armoured the evaporator in the first place,
 nothing goes wrong if it waits, because the fan cannot dry the chamber — a humidity burst
 that never runs is one that was not needed.
 
-There is no daily cap on humidity-driven bursts. Burst-then-settle is already the bound:
-90 s of fan per 20 minutes of settling is a ceiling of about 7% duty even with humidity
-pinned at the floor, which is a different animal from a controller that held the fan on
-for hours. After a burst the machine
+There is no daily cap on humidity-driven bursts. Burst-then-settle is the bound, and how
+tight a bound depends on `vent_settle_minutes`: at the 1.5-minute default a chamber with
+humidity pinned at the floor cycles at about 50% duty, while a longer settle trades
+responsiveness for a lower ceiling. Either way every burst ends, and the plate gate stops
+the cycle outright once the evaporator goes cold — which is the protection that matters,
+the duty ceiling being a second line rather than the first. After a burst the machine
 sits in `settling` for `vent_settle_minutes`, long enough for the chamber to mix and the
 SHT31 to catch up, before any new trigger is considered.
 
@@ -201,7 +203,7 @@ is *not* persisted — see [Flash wear](#flash-wear):
 | `vent_interval_hours` | `12.0` | How often a scheduled burst comes due |
 | `vent_first_hour_local` | `6` | Local hour the day's first slot is anchored to |
 | `vent_burst_seconds` | `90.0` | Length of one burst |
-| `vent_settle_minutes` | `20.0` | Quiet period after a burst before any new trigger |
+| `vent_settle_minutes` | `1.5` | Quiet period after a burst before any new trigger |
 | `vent_min_seconds_per_day` | `180.0` | Daily floor of fan time, spread across the day |
 | `vent_max_defer_minutes` | `360.0` | How long a cold plate may hold a burst back |
 | `vent_min_duty_percent` | `30` | Minimum fan duty while a burst runs, regardless of the knob |

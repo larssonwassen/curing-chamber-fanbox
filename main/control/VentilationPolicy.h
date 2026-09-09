@@ -49,7 +49,7 @@ struct VentilationSettings {
 	float intervalHours = 12.0f;     ///< Spacing of scheduled bursts.
 	int   firstHourLocal = 6;        ///< Local hour anchoring the schedule.
 	float burstSeconds = 90.0f;      ///< How long the fan runs per burst.
-	float settleMinutes = 20.0f;     ///< Quiet time before humidity may ask again.
+	float settleMinutes = 1.5f;      ///< Quiet time before humidity may ask again.
 	float plateGateC = 2.0f;         ///< Hold bursts while the plate is colder.
 	float maxDeferMinutes = 360.0f;  ///< Give up gating and ventilate anyway.
 	/// Floor on total fan time per day. Every burst counts towards it,

@@ -32,7 +32,7 @@ VentilationSettings defaults(void) {
 	cfg.intervalHours = 12.0f;
 	cfg.firstHourLocal = 6;
 	cfg.burstSeconds = 90.0f;
-	cfg.settleMinutes = 20.0f;
+	cfg.settleMinutes = 1.5f;
 	cfg.plateGateC = 2.0f;
 	cfg.maxDeferMinutes = 360.0f;
 	cfg.humiditySetpoint = 75.0f;
@@ -167,7 +167,7 @@ int main(void) {
 		VentilationInputs in = nominal(0);
 		in.humidity = 60.0f;
 		uint32_t fan = runFor(p, cfg, in, 20 * HOUR);
-		const uint32_t ceiling = 20 * 3600 * 90 / (90 + 20 * 60);
+		const uint32_t ceiling = 20 * 3600 * 90 / (90 + 90);
 		check(fan <= ceiling + 91, "burst-and-settle bounds a permanently dry chamber");
 		check(fan > 6 * 91, "...without an arbitrary daily cap cutting it short");
 	}
