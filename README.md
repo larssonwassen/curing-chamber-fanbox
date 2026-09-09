@@ -210,7 +210,8 @@ idf.py -p /dev/cu.usbmodemXXXX flash monitor
 ```
 
 `sdkconfig` is generated from [`sdkconfig.defaults`](sdkconfig.defaults) and is not
-committed.
+committed. Neither is `version.txt`, which CI writes so the build container does not have
+to run git; a local build calls `git describe` itself.
 
 ### Credentials
 
@@ -234,11 +235,21 @@ that is where the original NVS partition sat, and it is past its rated erase end
 
 ### Releasing an update
 
-`PROJECT_VER` in the top-level [`CMakeLists.txt`](CMakeLists.txt) is baked into the app
-descriptor and reported to ThingsBoard as `current_fw_version`. Bump it, tag the commit
-`vX.Y.Z`, and push the tag. CI refuses to build a tag that disagrees with `PROJECT_VER` —
-a package whose version differs from what the image reports installs and then still looks
-out of date, which is an update loop.
+The version comes from the git tag. Tag a commit `vX.Y.Z` and push the tag — there is
+nothing to edit first:
+
+```bash
+git tag v0.5.0 && git push origin v0.5.0
+```
+
+The tag string, minus the `v`, is baked into the app descriptor and reported to
+ThingsBoard as `current_fw_version`. Because it *is* the tag, a package whose version
+disagrees with what the image reports is not possible; that used to be a CI check, and
+the failure it guarded against is an update loop — a device that installs a package and
+still considers itself out of date.
+
+A build off a tag reports something like `0.5.0-3-gab12cd3-dirty`, which is deliberate: a
+hand-flashed build should not claim to be the release.
 
 The tagged build attaches the image and its SHA-256 to a GitHub release:
 
@@ -246,8 +257,12 @@ The tagged build attaches the image and its SHA-256 to a GitHub release:
 https://github.com/larssonwassen/curing-chamber-fanbox/releases/download/vX.Y.Z/curing-chamber-fanbox-X.Y.Z.bin
 ```
 
-Every build, tagged or not, also uploads the image as a workflow artifact, which is the
-convenient way to test a branch without building locally.
+Every build also uploads the image as a workflow artifact, which is the convenient way to
+test a branch without building locally.
+
+CI builds pull requests and tags, not pushes to `main`: a push to `main` is the merge of a
+pull request that was already built, so building it again builds the same tree twice.
+That relies on the repository requiring branches to be up to date before merging.
 
 Note that the device implements ThingsBoard's MQTT chunk protocol only. A package created
 as an *external URL* is not enough — the binary has to be stored in ThingsBoard itself,

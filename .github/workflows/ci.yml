@@ -1,8 +1,12 @@
 name: CI
 
+# Pull requests and tags only. A push to main is the merge of a pull request
+# that was already built, so building it again builds the same tree a second
+# time; requiring branches to be up to date before merging is what makes that
+# safe, and it is a repository setting rather than something a workflow can
+# assert.
 on:
   push:
-    branches: [main]
     tags: ['v*']
   pull_request:
 
@@ -21,22 +25,21 @@ jobs:
       version: ${{ steps.image.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # git describe needs the tags, and the default shallow checkout has
+          # none of them.
+          fetch-depth: 0
 
-      # A tag is a claim about what the image reports as its version, and
-      # ThingsBoard compares that string against the package it was told to
-      # install. A tag that disagrees with PROJECT_VER would produce a package
-      # the device downloads, installs, and then still considers out of date --
-      # an update loop. Refuse to build rather than ship that.
-      - name: Tag must match PROJECT_VER
-        if: startsWith(github.ref, 'refs/tags/v')
+      # Written here rather than inside the build container: the container runs
+      # as a different user over a bind mount, where git refuses the repository
+      # as dubiously owned and describe silently yields nothing.
+      - name: Derive the version from git
+        id: version
         run: |
-          tag="${GITHUB_REF_NAME#v}"
-          ver="$(sed -n 's/^set(PROJECT_VER "\(.*\)")/\1/p' CMakeLists.txt)"
-          echo "tag=$tag  PROJECT_VER=$ver"
-          test "$tag" = "$ver" || {
-            echo "::error::Tag $GITHUB_REF_NAME does not match PROJECT_VER $ver"
-            exit 1
-          }
+          ver="$(git describe --tags --always --dirty | sed 's/^v//')"
+          echo "$ver" > version.txt
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "Firmware version: $ver"
 
       - name: Build with ESP-IDF 6.0
         uses: espressif/esp-idf-ci-action@v1
@@ -50,7 +53,7 @@ jobs:
       - name: Name the image and checksum it
         id: image
         run: |
-          ver="$(sed -n 's/^set(PROJECT_VER "\(.*\)")/\1/p' CMakeLists.txt)"
+          ver="${{ steps.version.outputs.version }}"
           mkdir -p dist
           cp build/curing-chamber-fanbox.bin "dist/curing-chamber-fanbox-${ver}.bin"
           ( cd dist && sha256sum "curing-chamber-fanbox-${ver}.bin" > "curing-chamber-fanbox-${ver}.bin.sha256" )

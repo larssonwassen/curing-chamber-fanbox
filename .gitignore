@@ -10,6 +10,10 @@ managed_components/
 sdkconfig
 sdkconfig.old
 
+# Written by CI so the build container does not have to run git. A local build
+# derives the version from git describe instead.
+version.txt
+
 # Host test binaries (test/host/Makefile)
 test/host/test_*
 !test/host/test_*.cpp
