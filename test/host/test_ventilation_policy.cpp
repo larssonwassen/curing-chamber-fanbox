@@ -312,6 +312,174 @@ int main(void) {
 		check(fan >= 89 && fan <= 91, "scheduling survives the 32-bit millisecond wrap");
 	}
 
+	// ---- A burst is not a commitment --------------------------------------
+	//
+	// Both of these reproduce failures seen on the real chamber. The policy
+	// used to decide once, when a burst was raised, and never look again.
+
+	{
+		// Observed 2026-09-09: the plate touched the gate on its way up, the
+		// burst started, and the compressor cut back in immediately. The plate
+		// was below freezing ten seconds later and at -2.6 C when the burst
+		// finally ended, having spent 85 of its 90 seconds doing the one thing
+		// the gate exists to prevent.
+		VentilationPolicy p;
+		VentilationInputs in = nominal(0);
+		in.humidity = 60.0f; // dry: asks for a burst
+		in.plateConfigured = true;
+		in.plateValid = true;
+		in.plateC = cfg.plateGateC; // exactly on the gate, so the burst starts
+		uint32_t fan = 0;
+		for (uint32_t t = 0; t < 5 * MIN; t += SEC) {
+			in.nowMs = t;
+			if (t >= 10 * SEC) {
+				in.plateC = -3.0f; // the compressor comes back on
+			}
+			if (p.update(in, cfg).fanOn) {
+				fan++;
+			}
+		}
+		check(fan >= 5 && fan <= 20, "a plate that dives mid-burst cuts the burst short");
+	}
+
+	{
+		// The same dive, but immediately. The burst still gets its minimum
+		// on-time: a relay that can be dropped one tick after it closed is a
+		// worse problem than a few seconds of airflow.
+		VentilationPolicy p;
+		VentilationInputs in = nominal(0);
+		in.humidity = 60.0f;
+		in.plateConfigured = true;
+		in.plateValid = true;
+		in.plateC = cfg.plateGateC;
+		uint32_t fan = 0;
+		for (uint32_t t = 0; t < 5 * MIN; t += SEC) {
+			in.nowMs = t;
+			if (t >= 1 * SEC) {
+				in.plateC = -3.0f;
+			}
+			if (p.update(in, cfg).fanOn) {
+				fan++;
+			}
+		}
+		check(fan >= 5 && fan <= 8, "a burst is never cut shorter than the minimum on-time");
+	}
+
+	{
+		// A burst that overrode the gate to start must not then be cut off by
+		// it, or forcing it through would amount to not running it at all.
+		VentilationPolicy p;
+		VentilationInputs in = nominal(0);
+		in.humidity = 78.0f; // in band, so only the schedule can trigger
+		in.plateConfigured = true;
+		in.plateValid = true;
+		in.plateC = -9.0f; // never warms
+		// 12 h to the scheduled slot, then 6 h of deferral before it forces.
+		uint32_t fan = runFor(p, cfg, in, 20 * HOUR);
+		check(fan >= 89 && fan <= 91, "a burst forced past the gate runs its full length");
+	}
+
+	{
+		// Observed 2026-09-09: a burst raised at 63% RH waited seven minutes
+		// for the plate and fired at 72.7% -- above the setpoint it was meant
+		// to be climbing towards. Humidity rises steeply exactly while a burst
+		// is pending, because the same warming plate that opens the gate is
+		// giving its frost back to the air.
+		VentilationPolicy p;
+		VentilationInputs in = nominal(0);
+		in.humidity = 60.0f;
+		in.plateConfigured = true;
+		in.plateValid = true;
+		in.plateC = -9.0f;
+		uint32_t fan = 0;
+		for (uint32_t t = 0; t < 30 * MIN; t += SEC) {
+			in.nowMs = t;
+			if (t >= 5 * MIN) {
+				in.humidity = 76.0f; // frost coming back off the plate
+			}
+			if (t >= 10 * MIN) {
+				in.plateC = 5.0f; // gate opens, but the reason has gone
+			}
+			if (p.update(in, cfg).fanOn) {
+				fan++;
+			}
+		}
+		check(fan == 0, "a pending humidity burst is withdrawn once the chamber is no longer dry");
+	}
+
+	{
+		// The deadband that keeps the previous test from cancelling every
+		// burst it starts: raised at setpoint - undershoot, held to setpoint.
+		VentilationPolicy p;
+		VentilationInputs in = nominal(0);
+		in.humidity = 60.0f;
+		uint32_t fan = 0;
+		for (uint32_t t = 0; t < 3 * MIN; t += SEC) {
+			in.nowMs = t;
+			if (t >= 10 * SEC) {
+				// Working, but not finished.
+				in.humidity = cfg.humiditySetpoint - 3.0f;
+			}
+			if (p.update(in, cfg).fanOn) {
+				fan++;
+			}
+		}
+		check(fan >= 89 && fan <= 91, "a humidity burst holds past the level that raised it");
+	}
+
+	{
+		VentilationPolicy p;
+		VentilationInputs in = nominal(0);
+		in.humidity = 60.0f;
+		uint32_t fan = 0;
+		for (uint32_t t = 0; t < 3 * MIN; t += SEC) {
+			in.nowMs = t;
+			if (t >= 10 * SEC) {
+				in.humidity = cfg.humiditySetpoint + 1.0f;
+			}
+			if (p.update(in, cfg).fanOn) {
+				fan++;
+			}
+		}
+		check(fan >= 5 && fan <= 20, "...and stops once the chamber reaches the setpoint");
+	}
+
+	{
+		// The degenerate configuration: no deadband at all, with humidity
+		// parked exactly on the threshold, so the test that raises a burst and
+		// the test that holds one disagree on every single tick. Re-reading
+		// conditions continuously has to survive this without chattering the
+		// relay.
+		VentilationSettings c = cfg;
+		c.humidityUndershoot = 0.0f;
+		VentilationPolicy p;
+		VentilationInputs in = nominal(0);
+		in.humidity = c.humiditySetpoint;
+
+		uint32_t minOn = 0xFFFFFFFFu;
+		uint32_t minOff = 0xFFFFFFFFu;
+		uint32_t run = 0;
+		bool was = false;
+		bool first = true;
+		for (uint32_t t = 0; t < 1 * HOUR; t += SEC) {
+			in.nowMs = t;
+			const bool on = p.update(in, c).fanOn;
+			if (!first && on != was) {
+				if (was && run < minOn) {
+					minOn = run;
+				} else if (!was && run < minOff) {
+					minOff = run;
+				}
+				run = 0;
+			}
+			run++;
+			was = on;
+			first = false;
+		}
+		check(minOn >= 5, "a condition parked on its threshold cannot chatter the relay");
+		check(minOff >= 90, "...and cannot restart inside the settle window");
+	}
+
 	printf("%s\n", failures == 0 ? "all ok" : "FAILURES");
 	return failures == 0 ? 0 : 1;
 }

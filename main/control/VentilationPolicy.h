@@ -22,8 +22,26 @@
 //
 // Which is why this is not a setpoint controller. Ventilation happens on a
 // schedule, because its actual job is fresh air; humidity may ask for extra
-// bursts when the chamber is dry, bounded by a daily cap; and nothing here ever
-// tries to dry the chamber out, because the fan cannot.
+// bursts when the chamber is dry, bounded by burst-and-settle; and nothing here
+// ever tries to dry the chamber out, because the fan cannot.
+//
+// The state below records *history* -- when the last burst ran, which schedule
+// slot has been served, how much fan time the day has had. It deliberately does
+// not record *intent*: a burst that is owed, or one already running, re-reads
+// the plate and the humidity on every tick and stops as soon as its reasons
+// stop holding. An earlier version latched the decision at the moment a burst
+// was raised, which produced two failures that looked unrelated and were not.
+// A humidity burst asked for at 63% RH sat waiting on a cold plate for seven
+// minutes and then fired into a chamber that had climbed to 73%; and a burst
+// that started the instant the plate touched the gate kept running for another
+// eighty-five seconds while the plate dived to -2.6 C, which is precisely the
+// moist-air-onto-cold-metal event the gate exists to prevent.
+//
+// Re-reading a condition every tick invites the opposite failure, where a
+// condition sitting on its threshold cycles the fan at the loop rate. Three
+// things stop that: humidity bursts are raised at `setpoint - undershoot` but
+// held until `setpoint`, the plate must fall a little below the gate before it
+// cuts a burst, and no burst may be stopped before a minimum on-time.
 //
 // The predecessor was a bang-bang loop that held the fan on until humidity
 // reached a setpoint. That could run for hours, and the moisture it carried in
@@ -118,6 +136,13 @@ private:
 	void rollDayWindow(const VentilationInputs& in);
 	bool plateAllows(const VentilationInputs& in, const VentilationSettings& cfg) const;
 
+	// The "should this still be happening?" half. plateAllows()/dryRequest()
+	// decide whether to *start*; these decide whether to *continue*, and are
+	// re-read on every tick of a pending or running burst.
+	bool dryHolds(const VentilationInputs& in, const VentilationSettings& cfg) const;
+	bool triggerHolds(const VentilationInputs& in, const VentilationSettings& cfg) const;
+	bool plateHolds(const VentilationInputs& in, const VentilationSettings& cfg) const;
+
 	VentState   state_ = VentState::Idle;
 	VentTrigger trigger_ = VentTrigger::None;
 
@@ -125,6 +150,10 @@ private:
 	uint32_t burstEndedMs_ = 0;
 	uint32_t pendingSinceMs_ = 0;
 	bool     everBurst_ = false;
+	/// This burst overrode the plate gate to start -- a manual request, or a
+	/// scheduled one deferred past `maxDeferMinutes`. Such a burst is not cut
+	/// off by the gate afterwards, because that would undo the override.
+	bool     burstForced_ = false;
 
 	// Scheduling. With a clock the schedule is absolute, so the anchor is the
 	// slot that last ran; without one it is elapsed time since the last burst.

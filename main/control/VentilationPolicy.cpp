@@ -21,6 +21,20 @@ uint32_t elapsed_ms(uint32_t now, uint32_t then) {
 	return (uint32_t)(now - then);
 }
 
+/// Shortest time the fan may be commanded on. Every burst re-checks its own
+/// reasons on each tick, and a condition that flickers across its threshold
+/// would otherwise cycle the relay at the loop rate. Nothing here is allowed to
+/// stop a burst before this has passed; the burst length is the ceiling, this
+/// is the floor.
+const uint32_t MIN_ON_MS = 5000;
+
+/// How far below `plateGateC` the plate must fall before it cuts a burst that
+/// is already running. The probe quantises to 0.1 C, so a plate parked on the
+/// gate reads either side of it from one sample to the next; without this a
+/// burst would be started and cut by the same noise. Three counts is enough to
+/// ignore that and still catch a plate genuinely on its way back down.
+const float PLATE_STOP_HYSTERESIS_C = 0.3f;
+
 int64_t slot_seconds(const VentilationSettings& cfg) {
 	int64_t s = (int64_t)(cfg.intervalHours * 3600.0f);
 	// A zero or negative interval would make every update "due", pinning the
@@ -99,6 +113,52 @@ bool VentilationPolicy::dryRequest(const VentilationInputs& in, const Ventilatio
 	return in.humidity <= (cfg.humiditySetpoint - cfg.humidityUndershoot);
 }
 
+/// Whether a humidity burst that has already been asked for is still worth
+/// having.
+///
+/// Deliberately a weaker test than dryRequest(): a burst is raised at
+/// `setpoint - undershoot` and held all the way up to `setpoint`. The gap is
+/// what stops a burst from raising humidity past its own trigger and
+/// immediately cancelling itself, and the numbers for it are already
+/// configured -- no new knob.
+bool VentilationPolicy::dryHolds(const VentilationInputs& in, const VentilationSettings& cfg) const {
+	if (!in.humidityValid) {
+		// The reading that raised this burst has since gone stale. Let the
+		// burst finish rather than cancel it: it is bounded anyway, and a
+		// sensor dropout is not evidence the chamber got wetter.
+		return true;
+	}
+	return in.humidity < cfg.humiditySetpoint;
+}
+
+/// Whether the reason a burst was asked for still applies.
+///
+/// Only humidity can withdraw. Scheduled and make-up bursts exist to exchange
+/// air on a timetable and have no condition to satisfy, and a manual burst is
+/// somebody pressing a button -- second-guessing that is not this function's
+/// job.
+bool VentilationPolicy::triggerHolds(const VentilationInputs& in, const VentilationSettings& cfg) const {
+	if (trigger_ == VentTrigger::Dry) {
+		return dryHolds(in, cfg);
+	}
+	return true;
+}
+
+/// Whether the plate is still warm enough to keep a running burst going.
+///
+/// A burst that overrode the gate is not subject to it afterwards: forcing a
+/// deferred scheduled burst through and then cutting it off on the first tick
+/// would be the same as not running it at all.
+bool VentilationPolicy::plateHolds(const VentilationInputs& in, const VentilationSettings& cfg) const {
+	if (burstForced_ || !in.plateConfigured) {
+		return true;
+	}
+	if (!in.plateValid) {
+		return false;
+	}
+	return in.plateC >= (cfg.plateGateC - PLATE_STOP_HYSTERESIS_C);
+}
+
 bool VentilationPolicy::plateAllows(const VentilationInputs& in, const VentilationSettings& cfg) const {
 	if (!in.plateConfigured) {
 		return true; // No probe fitted: nothing to gate on.
@@ -124,19 +184,36 @@ VentilationDecision VentilationPolicy::update(const VentilationInputs& in, const
 
 	switch (state_) {
 	case VentState::Running: {
+		// A burst is not a commitment. The conditions that justified it are
+		// re-read on every tick, because the thing this gate exists to prevent
+		// -- moist room air meeting sub-zero metal -- is just as bad thirty
+		// seconds into a burst as it was at the start. Only the minimum on-time
+		// is unconditional.
 		const uint32_t burstMs = (uint32_t)(cfg.burstSeconds * 1000.0f);
-		if (elapsed_ms(in.nowMs, burstStartedMs_) >= burstMs) {
+		const uint32_t elapsed = elapsed_ms(in.nowMs, burstStartedMs_);
+		const char* stop = nullptr;
+		if (elapsed >= burstMs) {
+			stop = "burst complete";
+		} else if (elapsed >= MIN_ON_MS) {
+			if (!plateHolds(in, cfg)) {
+				stop = "plate went cold; burst cut short";
+			} else if (!triggerHolds(in, cfg)) {
+				stop = "reason satisfied; burst cut short";
+			}
+		}
+
+		if (stop != nullptr) {
 			state_ = VentState::Settling;
 			burstEndedMs_ = in.nowMs;
 			everBurst_ = true;
 			// Count what actually ran, not what was asked for: a burst whose
-			// settings changed underneath it, or one cut short by the loop
-			// being descheduled, should contribute what it really contributed.
-			dayRunMs_ += elapsed_ms(in.nowMs, burstStartedMs_);
+			// settings changed underneath it, or one cut short by the plate or
+			// by its own reason, should contribute what it really contributed.
+			dayRunMs_ += elapsed;
 			d.fanOn = false;
 			d.state = state_;
 			d.trigger = trigger_;
-			d.reason = "burst complete";
+			d.reason = stop;
 			return d;
 		}
 		d.fanOn = true;
@@ -175,9 +252,25 @@ VentilationDecision VentilationPolicy::update(const VentilationInputs& in, const
 		const bool mayForce = trigger_ != VentTrigger::Dry;
 		const bool expired = mayForce &&
 			elapsed_ms(in.nowMs, pendingSinceMs_) >= (uint32_t)(cfg.maxDeferMinutes * 60000.0f);
+
+		// A request is not a commitment either. Waiting for the plate takes
+		// minutes, and the chamber does not hold still meanwhile -- humidity
+		// climbs steeply as frost comes back off the warming plate. Firing a
+		// burst that was asked for at 63% into a chamber that is now at 73% is
+		// how a "the chamber is too dry" request ends up making it wetter.
+		if (!triggerHolds(in, cfg)) {
+			state_ = VentState::Idle;
+			trigger_ = VentTrigger::None;
+			d.fanOn = false;
+			d.state = state_;
+			d.reason = "request withdrawn; no longer dry";
+			return d;
+		}
+
 		if (plateAllows(in, cfg) || expired) {
 			state_ = VentState::Running;
 			burstStartedMs_ = in.nowMs;
+			burstForced_ = expired && !plateAllows(in, cfg);
 			d.fanOn = true;
 			d.state = state_;
 			d.trigger = trigger_;
@@ -204,6 +297,9 @@ VentilationDecision VentilationPolicy::update(const VentilationInputs& in, const
 		trigger_ = VentTrigger::Manual;
 		state_ = VentState::Running;
 		burstStartedMs_ = in.nowMs;
+		// Manual skips the gate on the way in, so it is not subject to it on
+		// the way through either.
+		burstForced_ = true;
 		d.fanOn = true;
 		d.state = state_;
 		d.trigger = trigger_;
@@ -238,6 +334,7 @@ VentilationDecision VentilationPolicy::update(const VentilationInputs& in, const
 	if (plateAllows(in, cfg)) {
 		state_ = VentState::Running;
 		burstStartedMs_ = in.nowMs;
+		burstForced_ = false;
 		d.fanOn = true;
 		d.reason = want == VentTrigger::Scheduled ? "scheduled burst"
 				 : want == VentTrigger::Makeup    ? "daily minimum burst"
