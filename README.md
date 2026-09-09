@@ -345,6 +345,36 @@ TB_DEVICE_PROFILE_NAME=default \
 Re-running it for a version that already exists is a no-op — ThingsBoard rejects a
 duplicate title and version, so the script checks first and exits cleanly.
 
+### Reading the chamber back
+
+[`tools/tb_telemetry.sh`](tools/tb_telemetry.sh) pulls telemetry and attributes out of
+ThingsBoard for analysis. It is read-only and writes nothing to ThingsBoard or the device.
+
+```bash
+./tools/tb_telemetry.sh latest          # newest value of every key
+./tools/tb_telemetry.sh series 24       # last 24 h, every reading, as JSON
+./tools/tb_telemetry.sh series 72 900   # last 72 h, 15-minute averages
+./tools/tb_telemetry.sh csv 48 > chamber.csv
+./tools/tb_telemetry.sh attrs           # includes vent_state and plate_probe
+```
+
+The credential is read from `~/.config/curing-chamber/tb_api_key` rather than an
+environment variable or an argument, so it stays out of shell history and out of the
+process table, and it is piped to `curl` as a header on stdin. Create it with:
+
+```bash
+mkdir -p ~/.config/curing-chamber && chmod 700 ~/.config/curing-chamber
+printf '%s' 'the-key' > ~/.config/curing-chamber/tb_api_key
+chmod 600 ~/.config/curing-chamber/tb_api_key
+```
+
+A ThingsBoard API key carries the permissions of the user that created it, so this wants a
+different key from the one CI uploads firmware with: reading telemetry needs a customer
+user, while creating an OTA package needs a tenant administrator. Two keys also means
+either can be revoked without breaking the other. The device lookup handles both, because
+a customer user is refused the tenant device-by-name endpoint and has to page its own
+device list instead.
+
 ### Tests
 
 The parsing code and the ventilation state machine are target-independent and have host
