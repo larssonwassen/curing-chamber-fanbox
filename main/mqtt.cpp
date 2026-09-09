@@ -167,15 +167,24 @@ static void handle_mqtt_message(const char* topic, char* data, size_t len) {
 	// Handle integer attributes
 	handle_int_attribute(jp, dataRoot, "uart_log_level", shared_attributes->uartLogLevel);
 	handle_int_attribute(jp, dataRoot, "streamer_log_level", shared_attributes->streamerLogLevel);
+	handle_int_attribute(jp, dataRoot, "vent_first_hour_local", shared_attributes->ventFirstHourLocal);
+	handle_int_attribute(jp, dataRoot, "vent_max_dry_bursts_per_day", shared_attributes->ventMaxDryBurstsPerDay);
+	handle_int_attribute(jp, dataRoot, "vent_min_duty_percent", shared_attributes->ventMinDutyPercent);
 
 	// Handle boolean attributes
 	handle_bool_attribute(jp, dataRoot, "fan_enabled", shared_attributes->fanEnabled);
 	handle_bool_attribute(jp, dataRoot, "ctrl_loop_enabled", shared_attributes->ctrlLoopEnabled);
+	handle_bool_attribute(jp, dataRoot, "vent_now", shared_attributes->ventNow);
 
 	// Handle floating point attributes
 	handle_number_attribute(jp, dataRoot, "humidity_setpoint", shared_attributes->humiditySetpoint);
-	handle_number_attribute(jp, dataRoot, "humidity_overshoot_limit", shared_attributes->humidityOvershootLimit);
 	handle_number_attribute(jp, dataRoot, "humidity_undershoot_limit", shared_attributes->humidityUndershootLimit);
+	handle_number_attribute(jp, dataRoot, "vent_interval_hours", shared_attributes->ventIntervalHours);
+	handle_number_attribute(jp, dataRoot, "vent_burst_seconds", shared_attributes->ventBurstSeconds);
+	handle_number_attribute(jp, dataRoot, "vent_settle_minutes", shared_attributes->ventSettleMinutes);
+	handle_number_attribute(jp, dataRoot, "vent_max_defer_minutes", shared_attributes->ventMaxDeferMinutes);
+	handle_number_attribute(jp, dataRoot, "plate_gate_temp_c", shared_attributes->plateGateTempC);
+	handle_number_attribute(jp, dataRoot, "vent_min_seconds_per_day", shared_attributes->ventMinSecondsPerDay);
 
 	esp_log_level_set("*", shared_attributes->uartLogLevel.get());
 

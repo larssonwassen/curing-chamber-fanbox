@@ -35,7 +35,7 @@ void log_nvs_stats(const char* when) {
 }
 
 /**
- * @brief Erase the telemetry keys that older firmware persisted on every update.
+ * @brief Erase NVS keys that this firmware no longer uses.
  *
  * Telemetry no longer carries NVS keys (see Telemetry in consts.h), so these
  * entries are dead weight in an already heavily worn partition. Erasing them is
@@ -43,7 +43,10 @@ void log_nvs_stats(const char* when) {
  * every subsequent call is a no-op that writes nothing.
  */
 static void purge_legacy_telemetry_keys(void) {
-	static const char* const legacy_keys[] = { "fd", "fr", "t", "h" };
+	// "hos" was humidity_overshoot_limit, from when the fan chased a setpoint
+	// in both directions. The fan cannot dry the chamber, so there is no
+	// overshoot behaviour left for it to configure.
+	static const char* const legacy_keys[] = { "fd", "fr", "t", "h", "hos" };
 
 	nvs_handle_t handle;
 	esp_err_t err = nvs_open("atomic_vars", NVS_READWRITE, &handle);

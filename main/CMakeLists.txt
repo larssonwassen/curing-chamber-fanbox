@@ -13,6 +13,12 @@ idf_component_register(
         "ram_info.cpp"
         "mqtt.cpp"
         "ota/OtaUpdater.cpp"
+        "climate/ClimateSensor.cpp"
+        "pot/Potentiometer.cpp"
+        "plate/PlateProbe.cpp"
+        "control/VentilationPolicy.cpp"
+        "control/Ventilation.cpp"
+        "net/TimeSync.cpp"
         "log_streamer.cpp"
         "util.cpp"
     INCLUDE_DIRS

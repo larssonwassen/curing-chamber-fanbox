@@ -54,3 +54,8 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # that exceed the 1 KB default. mqtt.cpp reassembles fragments regardless, but a
 # buffer that fits the common case avoids the churn.
 CONFIG_MQTT_BUFFER_SIZE=4096
+
+# Evaporator plate probe. Uncomment both lines once a DS18B20 is wired to D3
+# (GPIO 6) with a 4.7k pull-up to 3V3; until then ventilation runs ungated.
+# CONFIG_PLATE_PROBE_DS18B20=y
+# CONFIG_PLATE_PROBE_GPIO=6
