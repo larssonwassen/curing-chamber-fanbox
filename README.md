@@ -215,7 +215,23 @@ idf.py -p /dev/cu.usbmodemXXXX flash monitor
 ```
 
 `sdkconfig` is generated from [`sdkconfig.defaults`](sdkconfig.defaults) and is not
-committed. Neither is `version.txt`, which CI writes so the build container does not have
+committed.
+
+#### Flashing over USB while an OTA package is assigned
+
+A locally flashed build does not survive an assigned ThingsBoard package. `idf.py flash`
+writes `ota_0`, the bootloader may still be pointed at `ota_1`, and even after
+`idf.py erase-otadata` the device connects, sees a package whose version differs from the
+build it is running, and re-installs it about forty seconds later:
+
+```
+ota: Updating curing-chamber-fanbox 0.5.0-dirty -> 0.5.0 (1133840 bytes into ota_1)
+```
+
+That is the OTA logic working, and it is nearly invisible while it happens: the flash
+succeeds, the log looks right, and the firmware is quietly replaced before anything can be
+observed. Unassign the package in ThingsBoard before bench-flashing, or cut a release
+instead of flashing by hand. Neither is `version.txt`, which CI writes so the build container does not have
 to run git; a local build calls `git describe` itself.
 
 ### Credentials
