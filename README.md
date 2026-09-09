@@ -159,6 +159,11 @@ read the sensor directly. The filtered value is published as `humidity_avg` besi
 stays silent for one full time constant after boot, since until then the average is still
 mostly the single reading it was seeded from.
 
+Only the raise reads the average; a burst already running stops on the raw reading. The two
+questions are different. "Is this chamber dry?" is about the chamber's state, and the swing
+has to come out of it first. "Has this burst delivered enough air yet?" is about what the
+fan just did, and the filter is deliberately far too slow to see that.
+
 Whatever asked for it, **a burst serves the schedule slot it ends in**. Fresh air is fresh
 air, so a humidity burst at 07:00 satisfies the 06:00 slot and no scheduled burst follows.
 Without this the schedule cannot tell that the chamber has just been ventilated: on
