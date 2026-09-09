@@ -37,6 +37,19 @@
 // eighty-five seconds while the plate dived to -2.6 C, which is precisely the
 // moist-air-onto-cold-metal event the gate exists to prevent.
 //
+// A further consequence of the plate being the real dehumidifier: over a
+// compressor cycle, an instantaneous humidity reading mostly reports where the
+// compressor is, not how wet the chamber is. Measured on 2026-09-09 over a
+// clean 47-minute cycle with the fan idle, the chamber's water content swung
+// 3.38 to 6.60 g/kg -- 49% of its own peak -- as frost went onto the plate and
+// came back off it. At the cycle's mean temperature that is 49 points of
+// relative humidity, netted down to the 27 points actually observed only
+// because air temperature swings in phase and pulls the other way. A trigger
+// reading that raw signal fires at the trough of every cycle. So a dry burst is
+// raised only when the chamber is dry *both* right now and on a filtered
+// average spanning a cycle; it is still held, and cut short, on the raw reading,
+// because a burst's own effect is a step the filter is meant to lag.
+//
 // Re-reading a condition every tick invites the opposite failure, where a
 // condition sitting on its threshold cycles the fan at the loop rate. Three
 // things stop that: humidity bursts are raised at `setpoint - undershoot` but
@@ -80,6 +93,14 @@ struct VentilationSettings {
 	float minSecondsPerDay = 180.0f;
 	float humiditySetpoint = 75.0f;
 	float humidityUndershoot = 5.0f;
+	/// Time constant of the humidity average the dry trigger is raised on.
+	/// Wants to be comfortably longer than one compressor cycle: at two thirds
+	/// of the cycle a first-order filter still passes a third of the swing,
+	/// and at two cycles under a fifth. 30 minutes against the measured
+	/// 31-47 minute cycle turns a +/-13.5 point swing into +/-2.5, which
+	/// leaves the trigger most of its 7.5 points of margin. Zero disables the
+	/// average and restores the instantaneous behaviour.
+	float humidityAverageMinutes = 30.0f;
 };
 
 struct VentilationInputs {
@@ -119,6 +140,11 @@ public:
 	VentilationDecision update(const VentilationInputs& in, const VentilationSettings& cfg);
 
 	VentState state() const { return state_; }
+	/// The filtered humidity the dry trigger is raised on. Equal to the raw
+	/// reading until the first average has been seeded, and meaningless before
+	/// any valid reading has arrived -- check humidityAverageValid() first.
+	float humidityAverage() const { return humidityAvg_; }
+	bool humidityAverageValid() const { return humidityAvgValid_; }
 	/// Milliseconds until the next scheduled burst, or 0 when one is due or
 	/// running. Only meaningful without a clock; with one, the schedule is
 	/// absolute and this is an estimate.
@@ -140,11 +166,20 @@ private:
 	// decide whether to *start*; these decide whether to *continue*, and are
 	// re-read on every tick of a pending or running burst.
 	bool dryHolds(const VentilationInputs& in, const VentilationSettings& cfg) const;
+	void updateHumidityAverage(const VentilationInputs& in, const VentilationSettings& cfg);
 	bool triggerHolds(const VentilationInputs& in, const VentilationSettings& cfg) const;
 	bool plateHolds(const VentilationInputs& in, const VentilationSettings& cfg) const;
 
 	VentState   state_ = VentState::Idle;
 	VentTrigger trigger_ = VentTrigger::None;
+
+	// A first-order filter on humidity, long enough to span a compressor
+	// cycle. See the note above about what an instantaneous reading actually
+	// measures in this chamber.
+	float    humidityAvg_ = 0.0f;
+	bool     humidityAvgValid_ = false;
+	uint32_t humidityAvgMs_ = 0;
+	uint32_t humidityAvgSeedMs_ = 0;
 
 	uint32_t burstStartedMs_ = 0;
 	uint32_t burstEndedMs_ = 0;

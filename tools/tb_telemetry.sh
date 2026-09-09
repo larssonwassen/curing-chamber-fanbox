@@ -35,7 +35,7 @@ KEY_FILE="${TB_KEY_FILE:-$HOME/.config/curing-chamber/tb_api_key}"
 # Everything the firmware publishes as timeseries. plate_temperature is null
 # whenever a probe is configured but its reading has gone stale, which is
 # deliberate -- a gap should look like a gap.
-KEYS="temperature,humidity,plate_temperature,fan_duty_cycle,fan_rpm"
+KEYS="temperature,humidity,humidity_avg,plate_temperature,fan_duty_cycle,fan_rpm"
 
 usage() {
 	cat >&2 <<EOF

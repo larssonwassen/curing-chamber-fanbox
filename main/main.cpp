@@ -244,6 +244,14 @@ static bool publish_telemetry(JsonBuilder* jb) {
 	// controlled variable to whole percent -- in exactly the graph you would
 	// use to see whether the control loop is behaving.
 	jb->add("humidity", (double)(telemetry->humidity.get()), 1);
+	// What the dry trigger reads. Null until the filter has a reading, and
+	// whenever the average is switched off, so the chart shows a gap rather
+	// than a line pinned to a sentinel.
+	if (telemetry->humidityAverage.get() >= 0.0) {
+		jb->add("humidity_avg", (double)(telemetry->humidityAverage.get()), 1);
+	} else {
+		jb->addNull("humidity_avg");
+	}
 	// Null rather than a fabricated zero when no probe is fitted or it has
 	// stopped answering: a chart with a gap in it is honest, a chart pinned to
 	// 0 C looks like a frozen plate.
@@ -309,6 +317,7 @@ struct ControlSnapshot {
 	int32_t ventMinDutyPercent;
 	double  humiditySetpoint;
 	double  humidityUndershootLimit;
+	double  humidityAverageMinutes;
 	double  plateGateTempC;
 	double  ventIntervalHours;
 	double  ventBurstSeconds;
@@ -331,6 +340,7 @@ static ControlSnapshot read_control_snapshot(void) {
 	c.ventMinDutyPercent = shared_attributes->ventMinDutyPercent.get();
 	c.humiditySetpoint = shared_attributes->humiditySetpoint.get();
 	c.humidityUndershootLimit = shared_attributes->humidityUndershootLimit.get();
+	c.humidityAverageMinutes = shared_attributes->humidityAverageMinutes.get();
 	c.plateGateTempC = shared_attributes->plateGateTempC.get();
 	c.ventIntervalHours = shared_attributes->ventIntervalHours.get();
 	c.ventBurstSeconds = shared_attributes->ventBurstSeconds.get();
@@ -349,6 +359,7 @@ static bool publish_control_state(JsonBuilder* jb, const ControlSnapshot& c) {
 	jb->add("ctrl_loop_enabled", c.ctrlLoopEnabled);
 	jb->add("humidity_setpoint", c.humiditySetpoint, 1);
 	jb->add("humidity_undershoot_limit", c.humidityUndershootLimit, 1);
+	jb->add("humidity_average_minutes", c.humidityAverageMinutes, 1);
 	jb->add("plate_gate_temp_c", c.plateGateTempC, 1);
 	jb->add("vent_interval_hours", c.ventIntervalHours, 2);
 	jb->add("vent_first_hour_local", c.ventFirstHourLocal);
