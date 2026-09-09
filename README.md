@@ -57,7 +57,7 @@ Board photos are in `ESP32-S3-Nano_Version3.jpg` and `ESP32-S3-Nano_Version4.jpg
 | I²C SCL | `A5` | 12 |
 | Potentiometer | `A0` | 1 |
 | Fan enable | `D2` | 5 |
-| Plate probe 1-Wire | `D3` | 6 |
+| Plate probe 1-Wire | `D13` | 48 |
 
 Full board mapping is in [`main/pins.h`](main/pins.h).
 
@@ -127,13 +127,18 @@ Configure it under `idf.py menuconfig` → *Curing chamber fanbox*, or in
 
 ```
 CONFIG_PLATE_PROBE_DS18B20=y
-CONFIG_PLATE_PROBE_GPIO=6
+CONFIG_PLATE_PROBE_GPIO=48
 ```
 
-Wiring is three conductors: data to the configured GPIO, plus 3V3 and ground. **A 4.7 kΩ
-pull-up from the data line to 3V3 is required** — the driver does not enable an internal
-one and the bus does not work reliably without it. Do not use GPIO 5 (`D2`), which
-switches the fan, or GPIO 33-37, which carry the octal PSRAM.
+Wiring is three conductors: data to the configured GPIO, plus 3V3 and ground. The
+internal pull-up is enabled, so no external resistor is needed over a short lead — but it
+is roughly 45 kΩ where 1-Wire wants 4.7 kΩ, and a long probe cable adds capacitance that
+rounds off the rising edge until a one is sampled as a zero. That shows up as intermittent
+bad reads rather than a dead bus, so **fit a 4.7 kΩ resistor from data to 3V3 if the probe
+reads erratically** before suspecting the probe itself.
+
+GPIO 48 is also `SCK`, which costs nothing here because this firmware uses no SPI. Do not
+use GPIO 5 (`D2`), which switches the fan, or GPIO 33-37, which carry the octal PSRAM.
 
 A probe that appears after boot is picked up on a later sweep, so the firmware can be
 flashed before the probe is wired. A reading older than 30 s is reported as stale, which

@@ -18,20 +18,23 @@ config PLATE_PROBE_NONE
 config PLATE_PROBE_DS18B20
 	bool "DS18B20 (1-Wire)"
 	help
-	  A single DS18B20 on its own 1-Wire bus. Needs a 4.7k pull-up from the
-	  data line to 3V3; the driver does not enable an internal one, and the
-	  bus does not work reliably without it.
+	  A single DS18B20 on its own 1-Wire bus. The internal pull-up is enabled,
+	  which is enough over a short lead; it is about 45k where 1-Wire wants
+	  4.7k, so a long probe cable may still need the external resistor from
+	  the data line to 3V3.
 
 endchoice
 
 config PLATE_PROBE_GPIO
 	int "1-Wire GPIO for the plate probe"
 	depends on PLATE_PROBE_DS18B20
-	default 6
+	default 48
 	range 0 48
 	help
-	  GPIO 6 is D3 on the ESP32-S3-Nano silkscreen. Do not use GPIO 5 (D2):
-	  that switches the fan. Avoid GPIO 33-37, which carry the octal PSRAM.
+	  GPIO 48 is D13 on the ESP32-S3-Nano silkscreen, which is where the probe
+	  is actually wired. It is also SCK, which costs nothing here because this
+	  firmware uses no SPI. Do not use GPIO 5 (D2): that switches the fan.
+	  Avoid GPIO 33-37, which carry the octal PSRAM.
 
 config NTP_SERVER
 	string "NTP server"

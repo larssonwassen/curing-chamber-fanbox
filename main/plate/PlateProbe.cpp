@@ -69,6 +69,15 @@ static void plate_probe_task(void* arg) {
 	onewire_bus_handle_t bus = nullptr;
 	onewire_bus_config_t bus_config = {
 		.bus_gpio_num = CONFIG_PLATE_PROBE_GPIO,
+		// The ESP32's internal pull-up is around 45k, where 1-Wire wants 4.7k.
+		// It is enough to hold the idle line high and works over a short lead,
+		// but it recharges the bus slowly: the longer the probe cable, the more
+		// its capacitance rounds off the rising edge, until a read that should
+		// be a one is sampled as a zero. That failure is intermittent and
+		// temperature-dependent rather than clean, so if the probe reads
+		// erratically once the chamber door is shut, fit the external resistor
+		// before suspecting anything else.
+		.flags = { .en_pull_up = true },
 	};
 	// One DS18B20 answers in nine bytes; the default sizing is generous enough
 	// for the scratchpad read plus the ROM command that precedes it.
