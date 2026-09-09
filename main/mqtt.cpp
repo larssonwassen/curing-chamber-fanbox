@@ -102,7 +102,7 @@ void request_attributes(void) {
 	static const char SHARED_KEYS[] =
 		"uart_log_level,streamer_log_level,fan_enabled,ctrl_loop_enabled,"
 		"ota_on_dev_build,"
-		"humidity_setpoint,humidity_undershoot_limit,"
+		"humidity_setpoint,humidity_undershoot_limit,humidity_average_minutes,"
 		"vent_now,vent_interval_hours,vent_first_hour_local,vent_burst_seconds,"
 		"vent_settle_minutes,vent_max_defer_minutes,"
 		"vent_min_seconds_per_day,vent_min_duty_percent,plate_gate_temp_c,"
@@ -193,6 +193,7 @@ static void handle_mqtt_message(const char* topic, char* data, size_t len) {
 	// Handle floating point attributes
 	handle_number_attribute(jp, dataRoot, "humidity_setpoint", shared_attributes->humiditySetpoint);
 	handle_number_attribute(jp, dataRoot, "humidity_undershoot_limit", shared_attributes->humidityUndershootLimit);
+	handle_number_attribute(jp, dataRoot, "humidity_average_minutes", shared_attributes->humidityAverageMinutes);
 	handle_number_attribute(jp, dataRoot, "vent_interval_hours", shared_attributes->ventIntervalHours);
 	handle_number_attribute(jp, dataRoot, "vent_burst_seconds", shared_attributes->ventBurstSeconds);
 	handle_number_attribute(jp, dataRoot, "vent_settle_minutes", shared_attributes->ventSettleMinutes);

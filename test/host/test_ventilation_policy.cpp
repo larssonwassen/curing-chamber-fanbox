@@ -74,10 +74,45 @@ uint32_t runFor(VentilationPolicy& p, const VentilationSettings& cfg,
 	return fanSeconds;
 }
 
+/// Humidity as this chamber actually behaves: a large swing at the compressor
+/// period, as frost goes onto the evaporator plate and comes back off it.
+/// Triangular rather than sinusoidal so the test needs no math header -- the
+/// shape is not what matters here, the amplitude is.
+float cycling_humidity(uint32_t tMs, float mean, float amp, uint32_t periodMs) {
+	const uint32_t half = periodMs / 2;
+	const uint32_t phase = tMs % periodMs;
+	const float up = phase < half
+		? (float)phase / (float)half
+		: 1.0f - (float)(phase - half) / (float)half;
+	return (mean - amp) + 2.0f * amp * up;
+}
+
+/// Run the policy with humidity cycling the way the compressor makes it.
+uint32_t runCycling(VentilationPolicy& p, const VentilationSettings& cfg,
+					float mean, float amp, uint32_t durationMs) {
+	VentilationInputs in = nominal(0);
+	uint32_t fanSeconds = 0;
+	for (uint32_t t = 0; t < durationMs; t += SEC) {
+		in.nowMs = t;
+		in.humidity = cycling_humidity(t, mean, amp, 45 * MIN);
+		if (p.update(in, cfg).fanOn) {
+			fanSeconds++;
+		}
+	}
+	return fanSeconds;
+}
+
 } // namespace
 
 int main(void) {
 	const VentilationSettings cfg = defaults();
+	// The same settings with the humidity filter switched off. The filter
+	// withholds the dry trigger for a full time constant after boot, which is
+	// correct but makes it impossible to test burst mechanics inside a few
+	// simulated minutes. Tests that are about what a burst does once it is
+	// running use this; tests that are about the trigger itself use cfg.
+	VentilationSettings rawCfg = defaults();
+	rawCfg.humidityAverageMinutes = 0.0f;
 
 	// ---- Scheduling without a clock -------------------------------------
 	{
@@ -249,6 +284,40 @@ int main(void) {
 		check(fan2 >= 89 && fan2 <= 91, "clock: the 18:00 slot runs one burst");
 	}
 
+	{
+		// Observed 2026-09-09: a humidity burst finished ten seconds into the
+		// 18:00 slot, and the scheduled burst ran ninety seconds later. Between
+		// them they took the chamber from 63% to 87% RH. Whatever asked for it,
+		// a burst is fresh air, and the slot it ends in has had its air.
+		//
+		// Start at 17:58:30 in a dry chamber, so a humidity burst is raised at
+		// once and ends at about 18:00:00.
+		VentilationPolicy p;
+		VentilationInputs in = nominal(0);
+		in.haveClock = true;
+		const int64_t base = 1767200000 - (1767200000 % 86400) + 17 * 3600 + 58 * 60 + 30;
+		in.localEpoch = base;
+		in.humidity = 60.0f; // dry: asks for a burst immediately
+
+		uint32_t fan = 0;
+		for (uint32_t t = 0; t < 20 * MIN; t += SEC) {
+			in.nowMs = t;
+			in.localEpoch = base + t / SEC;
+			if (t >= 2 * MIN) {
+				// The burst did its job, so humidity stops asking. Anything
+				// that runs after this point is the schedule, not the chamber.
+				in.humidity = 78.0f;
+			}
+			if (p.update(in, rawCfg).fanOn) {
+				fan++;
+			}
+		}
+		// One burst, not two. Before this, the 18:00 slot could not tell that
+		// the chamber had been ventilated ten seconds into it, and ran a second
+		// full burst on top.
+		check(fan >= 89 && fan <= 91, "a burst serves the schedule slot it ends in");
+	}
+
 	// ---- Daily minimum ---------------------------------------------------
 	{
 		// The default minimum is exactly what the schedule delivers, so it must
@@ -328,14 +397,14 @@ int main(void) {
 		in.humidity = 60.0f; // dry: asks for a burst
 		in.plateConfigured = true;
 		in.plateValid = true;
-		in.plateC = cfg.plateGateC; // exactly on the gate, so the burst starts
+		in.plateC = rawCfg.plateGateC; // exactly on the gate, so the burst starts
 		uint32_t fan = 0;
 		for (uint32_t t = 0; t < 5 * MIN; t += SEC) {
 			in.nowMs = t;
 			if (t >= 10 * SEC) {
 				in.plateC = -3.0f; // the compressor comes back on
 			}
-			if (p.update(in, cfg).fanOn) {
+			if (p.update(in, rawCfg).fanOn) {
 				fan++;
 			}
 		}
@@ -351,14 +420,14 @@ int main(void) {
 		in.humidity = 60.0f;
 		in.plateConfigured = true;
 		in.plateValid = true;
-		in.plateC = cfg.plateGateC;
+		in.plateC = rawCfg.plateGateC;
 		uint32_t fan = 0;
 		for (uint32_t t = 0; t < 5 * MIN; t += SEC) {
 			in.nowMs = t;
 			if (t >= 1 * SEC) {
 				in.plateC = -3.0f;
 			}
-			if (p.update(in, cfg).fanOn) {
+			if (p.update(in, rawCfg).fanOn) {
 				fan++;
 			}
 		}
@@ -400,7 +469,7 @@ int main(void) {
 			if (t >= 10 * MIN) {
 				in.plateC = 5.0f; // gate opens, but the reason has gone
 			}
-			if (p.update(in, cfg).fanOn) {
+			if (p.update(in, rawCfg).fanOn) {
 				fan++;
 			}
 		}
@@ -418,9 +487,9 @@ int main(void) {
 			in.nowMs = t;
 			if (t >= 10 * SEC) {
 				// Working, but not finished.
-				in.humidity = cfg.humiditySetpoint - 3.0f;
+				in.humidity = rawCfg.humiditySetpoint - 3.0f;
 			}
-			if (p.update(in, cfg).fanOn) {
+			if (p.update(in, rawCfg).fanOn) {
 				fan++;
 			}
 		}
@@ -435,9 +504,9 @@ int main(void) {
 		for (uint32_t t = 0; t < 3 * MIN; t += SEC) {
 			in.nowMs = t;
 			if (t >= 10 * SEC) {
-				in.humidity = cfg.humiditySetpoint + 1.0f;
+				in.humidity = rawCfg.humiditySetpoint + 1.0f;
 			}
-			if (p.update(in, cfg).fanOn) {
+			if (p.update(in, rawCfg).fanOn) {
 				fan++;
 			}
 		}
@@ -478,6 +547,55 @@ int main(void) {
 		}
 		check(minOn >= 5, "a condition parked on its threshold cannot chatter the relay");
 		check(minOff >= 90, "...and cannot restart inside the settle window");
+	}
+
+	// ---- Humidity is filtered before it may ask for air --------------------
+	//
+	// Measured on the chamber, 2026-09-09, over a clean 47-minute compressor
+	// cycle with the fan idle: water content swung 3.38 to 6.60 g/kg, 49% of
+	// its own peak, purely from frost cycling on and off the plate. Relative
+	// humidity swung 27 points with it. None of that says anything about how
+	// much water the chamber holds.
+
+	{
+		// A chamber sitting exactly on setpoint, swinging the measured amount
+		// either side of it. Every cycle dips well past the trigger; none of
+		// those dips mean the chamber is dry. It must not ventilate.
+		VentilationPolicy p;
+		uint32_t fan = runCycling(p, cfg, cfg.humiditySetpoint, 13.5f, 6 * HOUR);
+		check(fan == 0, "a compressor cycle's humidity swing does not ask for air");
+	}
+
+	{
+		// The same swing around a mean that is genuinely dry. This one should.
+		VentilationPolicy p;
+		uint32_t fan = runCycling(p, cfg, 62.0f, 13.5f, 6 * HOUR);
+		check(fan > 90, "a chamber dry across the whole cycle still gets bursts");
+	}
+
+	{
+		// Without the filter, the identical in-band chamber ventilates on the
+		// trough of every cycle -- which is the behaviour being fixed. This is
+		// what the device did on 2026-09-09, raising a burst at 63% RH.
+		VentilationPolicy p;
+		uint32_t fan = runCycling(p, rawCfg, cfg.humiditySetpoint, 13.5f, 6 * HOUR);
+		check(fan > 90, "...and without the filter that same chamber ventilates");
+	}
+
+	{
+		// Seeded from a single reading, the average is that reading. Boot at
+		// the trough of a cycle and an unfiltered trigger would fire at once,
+		// so the trigger waits out a full time constant first.
+		VentilationPolicy p;
+		VentilationInputs in = nominal(0);
+		in.humidity = 60.0f; // dry, and dry on average -- but not yet known to be
+		uint32_t early = runFor(p, cfg, in, 29 * MIN);
+		check(early == 0, "the dry trigger waits for the humidity filter to warm up");
+
+		VentilationInputs in2 = in;
+		in2.nowMs = 29 * MIN;
+		uint32_t late = runFor(p, cfg, in2, 20 * MIN);
+		check(late > 0, "...and asks for air once it has");
 	}
 
 	printf("%s\n", failures == 0 ? "all ok" : "FAILURES");

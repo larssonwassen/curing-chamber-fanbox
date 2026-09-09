@@ -96,6 +96,37 @@ bool VentilationPolicy::scheduledDue(const VentilationInputs& in, const Ventilat
 	return since >= intervalMs;
 }
 
+/// Advance the humidity filter. First-order, evaluated from elapsed time
+/// rather than from a tick count, so it does not depend on the caller's
+/// cadence and survives a missed update.
+void VentilationPolicy::updateHumidityAverage(const VentilationInputs& in, const VentilationSettings& cfg) {
+	if (!in.humidityValid) {
+		// Hold the last average rather than decaying it towards nothing. A
+		// dropout should freeze the filter, not slowly invent a dry chamber.
+		return;
+	}
+	if (!humidityAvgValid_) {
+		humidityAvgValid_ = true;
+		humidityAvg_ = in.humidity;
+		humidityAvgMs_ = in.nowMs;
+		humidityAvgSeedMs_ = in.nowMs;
+		return;
+	}
+	const float tauMs = cfg.humidityAverageMinutes * 60000.0f;
+	float alpha = 1.0f;
+	if (tauMs > 0.0f) {
+		alpha = (float)elapsed_ms(in.nowMs, humidityAvgMs_) / tauMs;
+		if (alpha > 1.0f) {
+			// A long gap -- a stall, or the first update after a wrap. Adopt
+			// the current reading instead of extrapolating a filter that has
+			// no information about what happened in between.
+			alpha = 1.0f;
+		}
+	}
+	humidityAvg_ += (in.humidity - humidityAvg_) * alpha;
+	humidityAvgMs_ = in.nowMs;
+}
+
 bool VentilationPolicy::dryRequest(const VentilationInputs& in, const VentilationSettings& cfg) const {
 	if (!in.humidityValid) {
 		// A stale reading simply means humidity gets no vote. It does not stop
@@ -110,7 +141,30 @@ bool VentilationPolicy::dryRequest(const VentilationInputs& in, const Ventilatio
 			return false;
 		}
 	}
-	return in.humidity <= (cfg.humiditySetpoint - cfg.humidityUndershoot);
+	const float raiseBelow = cfg.humiditySetpoint - cfg.humidityUndershoot;
+	if (in.humidity > raiseBelow) {
+		return false;
+	}
+	// And dry on the average too. Without this the trough of every compressor
+	// cycle looks like a dry chamber: the plate gives its frost back to the air
+	// on the warm half of the cycle and takes it again on the cold half, which
+	// is worth tens of points of relative humidity in either direction and says
+	// nothing at all about how much water the chamber actually holds.
+	if (cfg.humidityAverageMinutes > 0.0f) {
+		const uint32_t tauMs = (uint32_t)(cfg.humidityAverageMinutes * 60000.0f);
+		// Until the filter has seen a full time constant it is still mostly the
+		// single reading it was seeded from, and seeding at the trough of a
+		// cycle would look exactly like a dry chamber. Withhold the dry trigger
+		// rather than act on that: the schedule and the daily minimum still run,
+		// and a humidity burst is never urgent.
+		if (!humidityAvgValid_ || elapsed_ms(in.nowMs, humidityAvgSeedMs_) < tauMs) {
+			return false;
+		}
+		if (humidityAvg_ > raiseBelow) {
+			return false;
+		}
+	}
+	return true;
 }
 
 /// Whether a humidity burst that has already been asked for is still worth
@@ -179,6 +233,7 @@ VentilationDecision VentilationPolicy::update(const VentilationInputs& in, const
 		bootMsSet_ = true;
 	}
 	rollDayWindow(in);
+	updateHumidityAverage(in, cfg);
 
 	VentilationDecision d;
 
@@ -210,6 +265,18 @@ VentilationDecision VentilationPolicy::update(const VentilationInputs& in, const
 			// settings changed underneath it, or one cut short by the plate or
 			// by its own reason, should contribute what it really contributed.
 			dayRunMs_ += elapsed;
+			// Whatever asked for it, a burst is fresh air, so it serves the
+			// schedule slot it ends in. Without this the schedule cannot tell
+			// that the chamber has just been ventilated: on 2026-09-09 a
+			// humidity burst finished ten seconds into the 18:00 slot and the
+			// scheduled burst followed ninety seconds later, taking the chamber
+			// from 63% to 87% RH between them. The no-clock path already
+			// behaves this way, because it measures the interval from the end
+			// of the last burst rather than from a slot boundary.
+			if (in.haveClock) {
+				lastRunSlot_ = current_slot(in.localEpoch, cfg);
+				haveRunSlot_ = true;
+			}
 			d.fanOn = false;
 			d.state = state_;
 			d.trigger = trigger_;

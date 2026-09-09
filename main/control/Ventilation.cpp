@@ -38,6 +38,7 @@ VentilationSettings read_settings(void) {
 	cfg.minSecondsPerDay = (float)shared_attributes->ventMinSecondsPerDay.get();
 	cfg.humiditySetpoint = (float)shared_attributes->humiditySetpoint.get();
 	cfg.humidityUndershoot = (float)shared_attributes->humidityUndershootLimit.get();
+	cfg.humidityAverageMinutes = (float)shared_attributes->humidityAverageMinutes.get();
 	return cfg;
 }
 
@@ -99,6 +100,10 @@ void ventilation_task(void* arg) {
 				lastReason = d.reason;
 				lastState = d.state;
 			}
+
+			// Negative stands for "no reading yet", and is published as null.
+			telemetry->humidityAverage.set(
+				s_policy.humidityAverageValid() ? (double)s_policy.humidityAverage() : -1.0);
 
 			attributes->ventState.set((int32_t)d.state);
 			const uint32_t nextMs = s_policy.msUntilScheduled(in, cfg);

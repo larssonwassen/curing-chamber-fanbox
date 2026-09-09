@@ -141,9 +141,32 @@ Four things can trigger a burst:
 | Trigger | Condition |
 |---|---|
 | scheduled | the interval elapsed |
-| dry | humidity below `humidity_setpoint − humidity_undershoot_limit` |
+| dry | *average* humidity below `humidity_setpoint − humidity_undershoot_limit` |
 | make-up | the day's fan time is behind the prorated share of `vent_min_seconds_per_day` |
 | manual | `vent_now` set in ThingsBoard — bypasses the plate gate |
+
+The dry trigger reads an average, not the sensor. This chamber's own compressor swings
+relative humidity by tens of points every half hour: measured over one clean 47-minute
+cycle with the fan idle, the air went from 3.38 to 6.60 g water per kg — half its own peak
+— as frost formed on the sub-zero plate and came back off it, and RH swung 27 points with
+it. An instantaneous reading therefore reports compressor phase at least as much as it
+reports how much water the chamber holds, and a trigger raised on it fires at the trough of
+every cycle regardless of the chamber's actual state. `humidity_average_minutes` sets the
+time constant of a first-order filter on that reading; at the 30-minute default, against a
+31–47 minute cycle, a ±13.5 point swing arrives at the trigger as ±2.5. Set it to zero to
+read the sensor directly. The filtered value is published as `humidity_avg` beside the raw
+`humidity`, because the gap between the two traces is the thing worth seeing. The trigger
+stays silent for one full time constant after boot, since until then the average is still
+mostly the single reading it was seeded from.
+
+Whatever asked for it, **a burst serves the schedule slot it ends in**. Fresh air is fresh
+air, so a humidity burst at 07:00 satisfies the 06:00 slot and no scheduled burst follows.
+Without this the schedule cannot tell that the chamber has just been ventilated: on
+2026-09-09 a humidity burst finished ten seconds into the 18:00 slot, the scheduled burst
+ran ninety seconds later, and between them they took the chamber from 63% to 87% RH.
+`vent_min_seconds_per_day` remains the floor on total air, so displacing scheduled bursts
+this way cannot starve the chamber. The no-clock path always behaved this way, because it
+measures the interval from the end of the last burst rather than from a slot boundary.
 
 `vent_now` is edge-triggered: ThingsBoard holds a shared attribute until something clears
 it, so a level trigger would ventilate forever. Only the rising edge counts, and the
@@ -258,6 +281,7 @@ is *not* persisted — see [Flash wear](#flash-wear):
 | `plate_gate_temp_c` | `2.0` | Plate temperature a burst needs to see before it runs |
 | `humidity_setpoint` | `75.0` | Target relative humidity, % |
 | `humidity_undershoot_limit` | `5.0` | Humidity asks for an extra burst below setpoint − this |
+| `humidity_average_minutes` | `30.0` | Time constant of the average the dry trigger reads; `0` reads the sensor |
 | `uart_log_level` | `DEBUG` | Console log level |
 | `streamer_log_level` | `INFO` | Level threshold for logs shipped over MQTT |
 

@@ -54,6 +54,11 @@ public:
 	/// Evaporator plate temperature. Left at its initial value, and published
 	/// as null, when no probe is fitted -- see PlateProbe.
 	AtomicVariable<double> plateTemperature;
+	/// The filtered humidity the dry trigger actually reads. Published beside
+	/// the raw value because the difference between them is the whole point:
+	/// the raw trace crosses the trigger level every compressor cycle and this
+	/// one does not. Negative when the filter has no reading yet.
+	AtomicVariable<double> humidityAverage;
 
 	Telemetry(void):
 		ChangeTrackable(),
@@ -65,7 +70,8 @@ public:
 		fanRPM(0, nullptr, onChange, this),
 		temperature(0.0f, nullptr, onChange, this),
 		humidity(0.0f, nullptr, onChange, this),
-		plateTemperature(0.0f, nullptr, onChange, this)
+		plateTemperature(0.0f, nullptr, onChange, this),
+		humidityAverage(-1.0f, nullptr, onChange, this)
 	{}
 };
 extern Telemetry* telemetry;
@@ -86,6 +92,12 @@ public:
 	/// overshoot limit any more: the fan cannot dry the chamber, so there is
 	/// nothing for it to do when humidity is high.
 	AtomicVariable<double> humidityUndershootLimit;
+	/// Time constant, in minutes, of the average the dry trigger reads instead
+	/// of the raw sensor. The chamber's own compressor swings humidity by tens
+	/// of points every half hour as frost goes onto the plate and comes back
+	/// off it; none of that swing means the chamber has gained or lost water.
+	/// Zero reads the sensor directly. See control/VentilationPolicy.h.
+	AtomicVariable<double> humidityAverageMinutes;
 
 	// Ventilation schedule. See control/VentilationPolicy.h for what these
 	// mean together; the short version is that ventilation is a timer, not a
@@ -117,6 +129,8 @@ public:
 		streamerLogLevel(ESP_LOG_INFO, "sll", onChange, this),
 		humiditySetpoint(75.0, "hsp", onChange, this),
 		humidityUndershootLimit(5.0, "hus", onChange, this),
+		// Comfortably longer than the measured 31-47 minute compressor cycle.
+		humidityAverageMinutes(30.0, "ham", onChange, this),
 		// Twice a day, anchored at 06:00 and 18:00 local.
 		ventIntervalHours(12.0, "vih", onChange, this),
 		ventFirstHourLocal(6, "vfh", onChange, this),
