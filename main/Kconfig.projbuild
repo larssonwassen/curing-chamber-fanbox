@@ -1,0 +1,52 @@
+menu "Curing chamber fanbox"
+
+choice PLATE_PROBE
+	prompt "Evaporator plate temperature probe"
+	default PLATE_PROBE_NONE
+	help
+	  Optional probe on the fridge's evaporator plate. The plate is the only
+	  dehumidifier in the chamber and the surface frost forms on, so knowing
+	  its temperature is what lets the firmware avoid ventilating moist air
+	  onto sub-zero metal.
+
+	  Leave this at None until a probe is physically fitted: with no probe,
+	  ventilation still runs on its schedule, just ungated.
+
+config PLATE_PROBE_NONE
+	bool "None"
+
+config PLATE_PROBE_DS18B20
+	bool "DS18B20 (1-Wire)"
+	help
+	  A single DS18B20 on its own 1-Wire bus. Needs a 4.7k pull-up from the
+	  data line to 3V3; the driver does not enable an internal one, and the
+	  bus does not work reliably without it.
+
+endchoice
+
+config PLATE_PROBE_GPIO
+	int "1-Wire GPIO for the plate probe"
+	depends on PLATE_PROBE_DS18B20
+	default 6
+	range 0 48
+	help
+	  GPIO 6 is D3 on the ESP32-S3-Nano silkscreen. Do not use GPIO 5 (D2):
+	  that switches the fan. Avoid GPIO 33-37, which carry the octal PSRAM.
+
+config NTP_SERVER
+	string "NTP server"
+	default "pool.ntp.org"
+	help
+	  Used to set the clock so ventilation can be scheduled at wall-clock
+	  times. Nothing blocks on it; without a sync, ventilation falls back to
+	  elapsed time since boot.
+
+config TIMEZONE
+	string "POSIX timezone string"
+	default "CET-1CEST,M3.5.0,M10.5.0/3"
+	help
+	  POSIX TZ, including DST rules. The default is Central European Time,
+	  which is what the chamber this firmware was written for lives in. For
+	  UTC use "UTC0".
+
+endmenu

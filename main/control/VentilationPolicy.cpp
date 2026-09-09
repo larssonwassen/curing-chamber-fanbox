@@ -1,0 +1,362 @@
+#include "VentilationPolicy.h"
+
+namespace {
+
+const int64_t SECONDS_PER_DAY = 86400;
+
+/// Floor division that stays correct for negative values, which matters for
+/// pre-1970 clocks and for the west-of-UTC case where localEpoch can dip below
+/// a day boundary.
+int64_t floor_div(int64_t a, int64_t b) {
+	int64_t q = a / b;
+	if ((a % b != 0) && ((a < 0) != (b < 0))) {
+		q--;
+	}
+	return q;
+}
+
+/// Elapsed milliseconds, correct across the ~49-day wrap of a 32-bit tick
+/// counter. Unsigned subtraction does the right thing; the cast is the point.
+uint32_t elapsed_ms(uint32_t now, uint32_t then) {
+	return (uint32_t)(now - then);
+}
+
+int64_t slot_seconds(const VentilationSettings& cfg) {
+	int64_t s = (int64_t)(cfg.intervalHours * 3600.0f);
+	// A zero or negative interval would make every update "due", pinning the
+	// fan on. One minute is already absurdly frequent; it is a floor, not a
+	// recommendation.
+	if (s < 60) {
+		s = 60;
+	}
+	return s;
+}
+
+} // namespace
+
+void VentilationPolicy::reset() {
+	*this = VentilationPolicy();
+}
+
+/// The scheduled slot containing `localEpoch`: slots run every intervalHours
+/// from firstHourLocal each local day.
+///
+/// Note that an interval that does not divide 24 restarts at firstHourLocal
+/// every midnight, so the last slot of a day can be short. That is deliberate:
+/// an anchored, predictable "06:00 and 18:00" is easier to reason about than a
+/// free-running period that drifts around the clock.
+static int64_t current_slot(int64_t localEpoch, const VentilationSettings& cfg) {
+	const int64_t slot = slot_seconds(cfg);
+	int64_t dayStart = floor_div(localEpoch, SECONDS_PER_DAY) * SECONDS_PER_DAY;
+	int64_t anchor = dayStart + (int64_t)cfg.firstHourLocal * 3600;
+	if (localEpoch < anchor) {
+		// Before the day's first slot: we are still in the tail of yesterday's
+		// schedule.
+		anchor -= SECONDS_PER_DAY;
+	}
+	return anchor + floor_div(localEpoch - anchor, slot) * slot;
+}
+
+bool VentilationPolicy::scheduledDue(const VentilationInputs& in, const VentilationSettings& cfg) {
+	if (in.haveClock) {
+		const int64_t slot = current_slot(in.localEpoch, cfg);
+		if (!haveRunSlot_) {
+			// First sight of a real clock. Adopt the slot we happen to be
+			// inside as already served rather than ventilating on the spot:
+			// otherwise every boot -- including a reboot loop -- would trigger
+			// a burst, and a device that reboots often would ventilate far more
+			// than the schedule asks for.
+			haveRunSlot_ = true;
+			lastRunSlot_ = slot;
+			return false;
+		}
+		return slot != lastRunSlot_;
+	}
+
+	// No clock. Fall back to elapsed time, anchored on boot so that the first
+	// burst is a full interval away rather than immediate -- same reasoning as
+	// above about reboots.
+	const uint32_t intervalMs = (uint32_t)(slot_seconds(cfg) * 1000);
+	const uint32_t since = everBurst_ ? elapsed_ms(in.nowMs, burstEndedMs_)
+									  : elapsed_ms(in.nowMs, bootMs_);
+	return since >= intervalMs;
+}
+
+bool VentilationPolicy::dryRequest(const VentilationInputs& in, const VentilationSettings& cfg) const {
+	if (!in.humidityValid) {
+		// A stale reading simply means humidity gets no vote. It does not stop
+		// scheduled ventilation: bursts are bounded, so a sensor failure can no
+		// longer leave the fan running indefinitely the way the old setpoint
+		// loop could.
+		return false;
+	}
+	if (cfg.maxDryBurstsPerDay > 0 && dryBursts_ >= cfg.maxDryBurstsPerDay) {
+		return false;
+	}
+	if (everBurst_) {
+		const uint32_t settleMs = (uint32_t)(cfg.settleMinutes * 60000.0f);
+		if (elapsed_ms(in.nowMs, burstEndedMs_) < settleMs) {
+			return false;
+		}
+	}
+	return in.humidity <= (cfg.humiditySetpoint - cfg.humidityUndershoot);
+}
+
+bool VentilationPolicy::plateAllows(const VentilationInputs& in, const VentilationSettings& cfg) const {
+	if (!in.plateConfigured) {
+		return true; // No probe fitted: nothing to gate on.
+	}
+	if (!in.plateValid) {
+		// Configured but not reading. Treat as cold -- the whole point of the
+		// gate is to avoid dumping moist air onto sub-zero metal, and "I don't
+		// know" is not a reason to assume the safe case. The defer timeout in
+		// update() keeps this from blocking ventilation forever.
+		return false;
+	}
+	return in.plateC >= cfg.plateGateC;
+}
+
+VentilationDecision VentilationPolicy::update(const VentilationInputs& in, const VentilationSettings& cfg) {
+	if (!bootMsSet_) {
+		bootMs_ = in.nowMs;
+		bootMsSet_ = true;
+	}
+	rollDayWindow(in);
+
+	VentilationDecision d;
+
+	switch (state_) {
+	case VentState::Running: {
+		const uint32_t burstMs = (uint32_t)(cfg.burstSeconds * 1000.0f);
+		if (elapsed_ms(in.nowMs, burstStartedMs_) >= burstMs) {
+			state_ = VentState::Settling;
+			burstEndedMs_ = in.nowMs;
+			everBurst_ = true;
+			// Count what actually ran, not what was asked for: a burst whose
+			// settings changed underneath it, or one cut short by the loop
+			// being descheduled, should contribute what it really contributed.
+			dayRunMs_ += elapsed_ms(in.nowMs, burstStartedMs_);
+			d.fanOn = false;
+			d.state = state_;
+			d.trigger = trigger_;
+			d.reason = "burst complete";
+			return d;
+		}
+		d.fanOn = true;
+		d.state = state_;
+		d.trigger = trigger_;
+		d.reason = trigger_ == VentTrigger::Scheduled ? "scheduled burst"
+				 : trigger_ == VentTrigger::Dry       ? "humidity burst"
+				 : trigger_ == VentTrigger::Makeup    ? "daily minimum burst"
+													  : "manual burst";
+		return d;
+	}
+
+	case VentState::Settling: {
+		const uint32_t settleMs = (uint32_t)(cfg.settleMinutes * 60000.0f);
+		if (elapsed_ms(in.nowMs, burstEndedMs_) >= settleMs) {
+			state_ = VentState::Idle;
+			trigger_ = VentTrigger::None;
+		}
+		d.fanOn = false;
+		d.state = state_;
+		d.reason = state_ == VentState::Settling ? "settling" : "idle";
+		return d;
+	}
+
+	case VentState::Pending: {
+		// A burst is owed. Hold it while the plate is below freezing-ish, so
+		// the moisture we bring in has somewhere to go other than straight onto
+		// the coldest surface in the box.
+		const bool expired = elapsed_ms(in.nowMs, pendingSinceMs_) >= (uint32_t)(cfg.maxDeferMinutes * 60000.0f);
+		if (plateAllows(in, cfg) || expired) {
+			state_ = VentState::Running;
+			burstStartedMs_ = in.nowMs;
+			if (trigger_ == VentTrigger::Dry) {
+				dryBursts_++;
+			}
+			d.fanOn = true;
+			d.state = state_;
+			d.trigger = trigger_;
+			d.reason = expired ? "deferred too long; ventilating anyway"
+							   : "plate warm enough; ventilating";
+			return d;
+		}
+		d.fanOn = false;
+		d.state = state_;
+		d.trigger = trigger_;
+		d.reason = in.plateValid ? "waiting for the plate to warm"
+								 : "waiting for a plate reading";
+		return d;
+	}
+
+	case VentState::Idle:
+	default:
+		break;
+	}
+
+	// Idle: is anything due? Manual first -- it is an explicit instruction and
+	// skips both the settle timer and the plate gate.
+	if (in.manualBurstRequest) {
+		trigger_ = VentTrigger::Manual;
+		state_ = VentState::Running;
+		burstStartedMs_ = in.nowMs;
+		d.fanOn = true;
+		d.state = state_;
+		d.trigger = trigger_;
+		d.reason = "manual burst";
+		return d;
+	}
+
+	VentTrigger want = VentTrigger::None;
+	if (scheduledDue(in, cfg)) {
+		want = VentTrigger::Scheduled;
+	} else if (dryRequest(in, cfg)) {
+		want = VentTrigger::Dry;
+	} else if (makeupRequest(in, cfg)) {
+		want = VentTrigger::Makeup;
+	}
+
+	if (want == VentTrigger::None) {
+		d.state = VentState::Idle;
+		d.reason = "idle";
+		return d;
+	}
+
+	// Claim the schedule slot at the moment the burst is triggered, not when it
+	// finally runs: otherwise a burst deferred past the next slot boundary
+	// would immediately be owed again.
+	if (want == VentTrigger::Scheduled && in.haveClock) {
+		lastRunSlot_ = current_slot(in.localEpoch, cfg);
+		haveRunSlot_ = true;
+	}
+
+	trigger_ = want;
+	if (plateAllows(in, cfg)) {
+		state_ = VentState::Running;
+		burstStartedMs_ = in.nowMs;
+		if (want == VentTrigger::Dry) {
+			dryBursts_++;
+		}
+		d.fanOn = true;
+		d.reason = want == VentTrigger::Scheduled ? "scheduled burst"
+				 : want == VentTrigger::Makeup    ? "daily minimum burst"
+												  : "humidity burst";
+	} else {
+		state_ = VentState::Pending;
+		pendingSinceMs_ = in.nowMs;
+		d.fanOn = false;
+		d.reason = in.plateValid ? "plate too cold; burst deferred"
+								 : "no plate reading; burst deferred";
+	}
+	d.state = state_;
+	d.trigger = trigger_;
+	return d;
+}
+
+/// Reset the per-day counters when the day rolls over.
+///
+/// With a clock this follows the local calendar day, so "six bursts a day" and
+/// "ten minutes a day" mean what a person means by them. Without a clock it is
+/// a rolling 24 hours from boot, which is the best available approximation.
+void VentilationPolicy::rollDayWindow(const VentilationInputs& in) {
+	if (in.haveClock) {
+		const int64_t day = floor_div(in.localEpoch, SECONDS_PER_DAY);
+		if (!dayIndexSet_) {
+			dayIndexSet_ = true;
+			dayIndex_ = day;
+			// Booting at 17:30 does not mean the chamber had no air since
+			// midnight -- it means this firmware was not watching. Credit the
+			// elapsed part of the day rather than immediately topping up a
+			// deficit it cannot know about, which would otherwise make every
+			// reboot trigger a burst.
+			dayStartFraction_ = (float)(in.localEpoch - day * SECONDS_PER_DAY) / (float)SECONDS_PER_DAY;
+			return;
+		}
+		if (day != dayIndex_) {
+			dayIndex_ = day;
+			dryBursts_ = 0;
+			dayRunMs_ = 0;
+			dayStartFraction_ = 0.0f;
+		}
+		return;
+	}
+
+	if (!dayWindowSet_) {
+		dayWindowStartMs_ = in.nowMs;
+		dayWindowSet_ = true;
+		return;
+	}
+	if (elapsed_ms(in.nowMs, dayWindowStartMs_) >= (uint32_t)SECONDS_PER_DAY * 1000u) {
+		dayWindowStartMs_ = in.nowMs;
+		dryBursts_ = 0;
+		dayRunMs_ = 0;
+	}
+}
+
+/// True when the day's fan time is far enough behind a prorated target to be
+/// worth a burst now.
+///
+/// Prorated rather than checked at the end of the day: a chamber that has had
+/// no air since morning should get some at lunchtime, not a ten-minute blast at
+/// 23:59. The shortfall has to exceed a whole burst before one is issued, which
+/// is what stops this from chasing the target continuously -- without that, a
+/// minimum equal to what the schedule already delivers would still fire an
+/// extra burst every time the linear target crept ahead between scheduled runs.
+bool VentilationPolicy::makeupRequest(const VentilationInputs& in, const VentilationSettings& cfg) const {
+	if (cfg.minSecondsPerDay <= 0.0f) {
+		return false;
+	}
+	if (everBurst_) {
+		const uint32_t settleMs = (uint32_t)(cfg.settleMinutes * 60000.0f);
+		if (elapsed_ms(in.nowMs, burstEndedMs_) < settleMs) {
+			return false;
+		}
+	}
+
+	float fractionOfDay;
+	if (in.haveClock) {
+		const int64_t secondsIntoDay = in.localEpoch - floor_div(in.localEpoch, SECONDS_PER_DAY) * SECONDS_PER_DAY;
+		fractionOfDay = (float)secondsIntoDay / (float)SECONDS_PER_DAY;
+	} else {
+		if (!dayWindowSet_) {
+			return false;
+		}
+		// The no-clock window already starts at boot, so nothing has been
+		// missed and dayStartFraction_ stays zero.
+		fractionOfDay = (float)elapsed_ms(in.nowMs, dayWindowStartMs_) / (float)(SECONDS_PER_DAY * 1000);
+	}
+	if (fractionOfDay > 1.0f) {
+		fractionOfDay = 1.0f;
+	}
+
+	// Only the part of the day this policy has actually been watching counts.
+	float watched = fractionOfDay - dayStartFraction_;
+	if (watched <= 0.0f) {
+		return false;
+	}
+	const float targetSeconds = cfg.minSecondsPerDay * watched;
+	const float ranSeconds = (float)dayRunMs_ / 1000.0f;
+	return (targetSeconds - ranSeconds) >= cfg.burstSeconds;
+}
+
+uint32_t VentilationPolicy::msUntilScheduled(const VentilationInputs& in, const VentilationSettings& cfg) const {
+	if (state_ != VentState::Idle) {
+		return 0;
+	}
+	const int64_t slot = slot_seconds(cfg);
+	if (in.haveClock) {
+		if (!haveRunSlot_) {
+			return 0;
+		}
+		const int64_t next = lastRunSlot_ + slot;
+		if (in.localEpoch >= next) {
+			return 0;
+		}
+		return (uint32_t)((next - in.localEpoch) * 1000);
+	}
+	const uint32_t intervalMs = (uint32_t)(slot * 1000);
+	const uint32_t since = everBurst_ ? elapsed_ms(in.nowMs, burstEndedMs_)
+									  : elapsed_ms(in.nowMs, bootMs_);
+	return since >= intervalMs ? 0 : intervalMs - since;
+}

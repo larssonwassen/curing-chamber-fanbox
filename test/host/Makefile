@@ -10,7 +10,7 @@ MAIN := ../../main
 CXXFLAGS := -std=c++17 -g -O1 -Wall -Wextra -Wno-unused-parameter \
             -fsanitize=address,undefined -fno-omit-frame-pointer
 
-TESTS := test_json_parser test_util test_json_builder
+TESTS := test_json_parser test_util test_json_builder test_ventilation_policy
 
 .PHONY: all clean
 all: $(TESTS)
@@ -25,6 +25,11 @@ test_util: test_util.cpp $(MAIN)/util.cpp
 # stubs/ supplies a minimal esp_log.h; JsonBuilder.h needs only esp_log_level_t.
 test_json_builder: test_json_builder.cpp $(MAIN)/JsonBuilder/JsonBuilder.cpp
 	$(CXX) $(CXXFLAGS) -I$(MAIN)/JsonBuilder -Istubs $^ -o $@
+
+# The ventilation policy is deliberately free of ESP-IDF and FreeRTOS, so it
+# compiles here as-is -- no stubs needed.
+test_ventilation_policy: test_ventilation_policy.cpp $(MAIN)/control/VentilationPolicy.cpp
+	$(CXX) $(CXXFLAGS) -I$(MAIN) $^ -o $@
 
 clean:
 	rm -rf $(TESTS) *.dSYM

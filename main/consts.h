@@ -51,6 +51,9 @@ public:
 	AtomicVariable<uint16_t> fanRPM;
 	AtomicVariable<double> temperature;
 	AtomicVariable<double> humidity;
+	/// Evaporator plate temperature. Left at its initial value, and published
+	/// as null, when no probe is fitted -- see PlateProbe.
+	AtomicVariable<double> plateTemperature;
 
 	Telemetry(void):
 		ChangeTrackable(),
@@ -61,7 +64,8 @@ public:
 		fanDuty(0, nullptr, onChange, this),
 		fanRPM(0, nullptr, onChange, this),
 		temperature(0.0f, nullptr, onChange, this),
-		humidity(0.0f, nullptr, onChange, this)
+		humidity(0.0f, nullptr, onChange, this),
+		plateTemperature(0.0f, nullptr, onChange, this)
 	{}
 };
 extern Telemetry* telemetry;
@@ -73,8 +77,33 @@ public:
 	AtomicVariable<esp_log_level_t> uartLogLevel;
 	AtomicVariable<esp_log_level_t> streamerLogLevel;
 	AtomicVariable<double> humiditySetpoint;
-	AtomicVariable<double> humidityOvershootLimit;
+	/// How far below the setpoint the chamber must fall before humidity is
+	/// allowed to ask for an extra ventilation burst. There is no matching
+	/// overshoot limit any more: the fan cannot dry the chamber, so there is
+	/// nothing for it to do when humidity is high.
 	AtomicVariable<double> humidityUndershootLimit;
+
+	// Ventilation schedule. See control/VentilationPolicy.h for what these
+	// mean together; the short version is that ventilation is a timer, not a
+	// setpoint controller, because fresh air rather than humidity is its job.
+	AtomicVariable<double> ventIntervalHours;
+	AtomicVariable<int32_t> ventFirstHourLocal;
+	AtomicVariable<double> ventBurstSeconds;
+	AtomicVariable<double> ventSettleMinutes;
+	AtomicVariable<double> ventMaxDeferMinutes;
+	AtomicVariable<int32_t> ventMaxDryBurstsPerDay;
+	/// Floor on total fan seconds per day, topped up with extra bursts spread
+	/// through the day when humidity has not asked for enough air on its own.
+	AtomicVariable<double> ventMinSecondsPerDay;
+	/// Minimum fan duty, in percent, while a ventilation burst is running. The
+	/// knob still sets the speed the rest of the time; this only stops a knob
+	/// left at zero from turning a burst into silence. Zero disables it.
+	AtomicVariable<int32_t> ventMinDutyPercent;
+	/// Plate temperature above which ventilation may run.
+	AtomicVariable<double> plateGateTempC;
+	/// Edge-triggered: set it true in ThingsBoard to ventilate now. Not
+	/// persisted -- a burst request should not survive a reboot.
+	AtomicVariable<bool> ventNow;
 
 	SharedAttributes():
 		ChangeTrackable(),
@@ -83,8 +112,20 @@ public:
 		uartLogLevel(ESP_LOG_DEBUG, "ull", onChange, this),
 		streamerLogLevel(ESP_LOG_INFO, "sll", onChange, this),
 		humiditySetpoint(75.0, "hsp", onChange, this),
-		humidityOvershootLimit(5.0, "hos", onChange, this),
-		humidityUndershootLimit(5.0, "hus", onChange, this)
+		humidityUndershootLimit(5.0, "hus", onChange, this),
+		// Twice a day, anchored at 06:00 and 18:00 local.
+		ventIntervalHours(12.0, "vih", onChange, this),
+		ventFirstHourLocal(6, "vfh", onChange, this),
+		ventBurstSeconds(90.0, "vbs", onChange, this),
+		ventSettleMinutes(20.0, "vsm", onChange, this),
+		ventMaxDeferMinutes(360.0, "vmd", onChange, this),
+		ventMaxDryBurstsPerDay(6, "mdb", onChange, this),
+		// Matches what the default schedule already delivers (2 x 90 s), so it
+		// is inert until raised.
+		ventMinSecondsPerDay(180.0, "vms", onChange, this),
+		ventMinDutyPercent(30, "vmp", onChange, this),
+		plateGateTempC(2.0, "pgt", onChange, this),
+		ventNow(false, nullptr, onChange, this)
 	{}
 };
 extern SharedAttributes* shared_attributes;
@@ -93,11 +134,23 @@ class Attributes : public ChangeTrackable {
 public:
 	AtomicVariable<bool> fanEnabled;
 	AtomicVariable<bool> fanRunning;
+	/// Current VentState, as its underlying integer. Stored rather than
+	/// recomputed so the publisher does not need the policy object.
+	AtomicVariable<int32_t> ventState;
+	/// Seconds until the next scheduled burst. -1 when one is due or running.
+	AtomicVariable<int32_t> ventNextSeconds;
+	/// The fan was told to run during a burst and reported no RPM. A burst that
+	/// moves no air is indistinguishable from one that worked, unless this is
+	/// reported.
+	AtomicVariable<bool> fanStalled;
 
 	Attributes():
 		ChangeTrackable(),
 		fanEnabled(true, nullptr, onChange, this),
-		fanRunning(false, nullptr, onChange, this)
+		fanRunning(false, nullptr, onChange, this),
+		ventState(0, nullptr, onChange, this),
+		ventNextSeconds(-1, nullptr, onChange, this),
+		fanStalled(false, nullptr, onChange, this)
 	{}
 };
 extern Attributes* attributes;

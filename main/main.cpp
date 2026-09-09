@@ -10,8 +10,6 @@
 #include "freertos/timers.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
-#include "esp_adc/adc_continuous.h"
-#include "soc/soc_caps.h"
 #include "esp_random.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -26,7 +24,6 @@
 #include "I2C/I2CBus.h"
 #include "I2C/I2CDevice.h"
 #include "EMC2101/EMC2101.h"
-#include "SHT31/SHT31.h"
 #include "JsonBuilder/JsonBuilder.h"
 #include "ram_info.h"
 #include "consts.h"
@@ -34,6 +31,11 @@
 #include "mqtt.h"
 #include "config/DeviceConfig.h"
 #include "ota/OtaUpdater.h"
+#include "climate/ClimateSensor.h"
+#include "pot/Potentiometer.h"
+#include "plate/PlateProbe.h"
+#include "control/Ventilation.h"
+#include "net/TimeSync.h"
 
 
 static const char *TAG = "curing-chamber-fanbox";
@@ -76,10 +78,7 @@ static void wifi_retry_cb(void* arg) {
 }
 
 TaskHandle_t fan_task_handle = nullptr;
-TaskHandle_t adc_task_handle = nullptr;
-TaskHandle_t climate_sensor_task_handle = nullptr;
 TaskHandle_t telemetry_task_handle = nullptr;
-TaskHandle_t control_loop_task_handle = nullptr;
 
 static void wifi_event_handler(void* event_handler_arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
 	if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
@@ -181,6 +180,8 @@ void fan_task(void* arg) {
 	fan.setDutyCycle(0);
 
 	uint8_t shadowDuty = telemetry->fanDuty.get();
+	// -1 so the first pass always writes, whatever the knob reads.
+	int16_t shadowPercent = -1;
 	uint16_t shadowRPM = 0;
 	while (true) {
 		uint16_t rpm = fan.getFanRPM();
@@ -189,194 +190,30 @@ void fan_task(void* arg) {
 			ESP_LOGD(TAG, "Fan RPM: %d", rpm);
 		}
 		telemetry->fanRPM.set(rpm);
+		// Convert the 0-255 knob reading to a percentage, then apply the
+		// ventilation floor. Without the floor, a knob left at zero turns every
+		// scheduled burst into a relay click and no air at all -- and the
+		// ventilation controller would go on believing the chamber had been
+		// aired.
 		uint8_t currentDuty = telemetry->fanDuty.get();
-		if (shadowDuty != currentDuty) {
+		uint8_t prcnt = (uint8_t)ceil((currentDuty / 255.0) * 100);
+		if ((VentState)attributes->ventState.get() == VentState::Running) {
+			uint8_t floorPct = (uint8_t)MIN(100, MAX(0, shared_attributes->ventMinDutyPercent.get()));
+			prcnt = MAX(prcnt, floorPct);
+		}
+		if (shadowPercent != prcnt) {
+			shadowPercent = prcnt;
 			shadowDuty = currentDuty;
-			// Convert 0-255 range to 0-100% range
-			uint8_t prcnt = ceil((currentDuty / 255.0) * 100);
-			if (prcnt <= 0) {
+			if (prcnt == 0) {
 				fan.setFanMinRPM(100);
 				fan.setDutyCycle(0);
 			} else if (!fan.setDutyCycle(prcnt)) {
 				ESP_LOGE(TAG, "Failed to set fan duty cycle");
 			} else {
-				ESP_LOGD(TAG, "Potentiometer changed to %d%% (ADC: %d)", prcnt, currentDuty);
+				ESP_LOGD(TAG, "Fan duty %d%% (knob: %d/255)", prcnt, currentDuty);
 			}
 		}
 		vTaskDelay(pdMS_TO_TICKS(100));
-	}
-}
-
-static SHT31 climateSensor; // SHT31 temperature and humidity sensor
-
-// When the last SHT31 read succeeded, in tick-derived milliseconds. Written
-// only by climate_sensor_task and read only by control_loop_task; a 32-bit
-// aligned load/store is atomic on this target, so no lock is warranted. The
-// counter wraps every ~49 days and unsigned subtraction stays correct across
-// the wrap.
-static volatile uint32_t s_climate_last_ok_ms = 0;
-static volatile bool s_climate_ever_ok = false;
-
-// Thirty consecutive failed reads at one per second. Long enough to ride out a
-// transient bus error, short enough that the fan is not left running on a
-// number from several minutes ago.
-static const uint32_t CLIMATE_STALE_MS = 30000;
-
-/// True when no successful climate reading is recent enough to regulate on.
-static bool climate_is_stale(void) {
-	if (!s_climate_ever_ok) {
-		return true; // Nothing has ever been read; 0.0%% is not a measurement.
-	}
-	uint32_t now = (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount());
-	return (uint32_t)(now - s_climate_last_ok_ms) > CLIMATE_STALE_MS;
-}
-void climate_sensor_task(void* arg) {
-	const int max_retries = 3;
-	int retries = 0;
-	// Try default address first
-	while (!climateSensor.begin(SHT31_I2CADDR_DEFAULT)) {
-		ESP_LOGE(TAG, "Failed to initialize SHT31 at address 0x%02X, retrying...", SHT31_I2CADDR_DEFAULT);
-		vTaskDelay(pdMS_TO_TICKS(1000));
-		if (retries++ >= max_retries) {
-			ESP_LOGE(TAG, "Exceeded maximum retries for SHT31 initialization");
-			while (true) {
-				vTaskDelay(pdMS_TO_TICKS(10000));
-			}
-		}
-	}
-	
-	ESP_LOGI(TAG, "Climate Sensor initialized successfully");
-	
-	// Set high repeatability for best accuracy
-	if (!climateSensor.setRepeatability(SHT31_REPEATABILITY_HIGH)) {
-		ESP_LOGE(TAG, "Failed to set climate sensor repeatability");
-	}
-	
-	float temperature = 0.0f, humidity = 0.0f, lastTemperature = 0.0f, lastHumidity = 0.0f;
-	while (true) {
-		if (climateSensor.readTempHumidity(&temperature, &humidity)) {
-			if (fabsf(lastTemperature - temperature) >= 0.05f || fabsf(lastHumidity - humidity) >= 0.5f) {
-				ESP_LOGD(TAG, "%.2f°C %.2f%%", temperature, humidity);
-				lastTemperature = temperature;
-				lastHumidity = humidity;
-			}
-			telemetry->temperature.set(temperature);
-			telemetry->humidity.set(humidity);
-			s_climate_last_ok_ms = (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount());
-			s_climate_ever_ok = true;
-		} else {
-			ESP_LOGE(TAG, "Failed to read climate sensor data");
-		}
-		
-		vTaskDelay(pdMS_TO_TICKS(1000));
-	}
-}
-
-static double calculate_attenuated_voltage(double Vin, double attenuation_dB) {
-	return Vin * pow(10.0, attenuation_dB / 20.0);
-}
-
-static bool IRAM_ATTR s_conv_done_cb(adc_continuous_handle_t handle, const adc_continuous_evt_data_t *edata, void *user_data)
-{
-	BaseType_t mustYield = pdFALSE;
-	vTaskNotifyGiveFromISR(adc_task_handle, &mustYield);
-	return (mustYield == pdTRUE);
-}
-
-#define ADC_FRAME_SIZE SOC_ADC_DIGI_DATA_BYTES_PER_CONV * 16
-#define ADC_MAX_INPUT_VOLTAGE 3.253f // measured voltage at the pot.
-#define ADC_MAX_REF_VOLTAGE calculate_attenuated_voltage(1.1f, 12.0f)
-static void adc_task(void* arg) {
-
-	adc_continuous_handle_cfg_t adc_config = {
-		.max_store_buf_size = 1024,
-		.conv_frame_size = ADC_FRAME_SIZE,
-		.flags = {
-			.flush_pool = true,
-		},
-	};
-	adc_continuous_handle_t handle = NULL;
-	ESP_ERROR_CHECK(adc_continuous_new_handle(&adc_config, &handle));
-
-	// Zero-init: these config structs gain fields between IDF releases, and any
-	// field left unset would otherwise carry stack garbage into the driver.
-	// `format` is deprecated as of IDF 6 -- the driver selects the only output
-	// format the target supports (TYPE2 on the ESP32-S3), so it is no longer set.
-	adc_digi_pattern_config_t adc_pattern[1] = {};
-	adc_pattern[0].atten = ADC_ATTEN_DB_12;
-	adc_pattern[0].channel = ADC_CHANNEL_0;
-	adc_pattern[0].unit = ADC_UNIT_1;
-	adc_pattern[0].bit_width = 12;
-
-	adc_continuous_config_t dig_cfg = {};
-	dig_cfg.pattern_num = 1;
-	dig_cfg.sample_freq_hz = 20 * 1000;
-	dig_cfg.conv_mode = ADC_CONV_SINGLE_UNIT_1;
-	dig_cfg.adc_pattern = adc_pattern;
-	ESP_ERROR_CHECK(adc_continuous_config(handle, &dig_cfg));
-
-	adc_continuous_evt_cbs_t cbs = {
-		.on_conv_done = s_conv_done_cb,
-		.on_pool_ovf = NULL,
-	};
-
-	ESP_ERROR_CHECK(adc_continuous_register_event_callbacks(handle, &cbs, NULL));
-	ESP_ERROR_CHECK(adc_continuous_start(handle));
-	ESP_LOGI(TAG, "ADC continuous started");
-
-	uint32_t resN = 0;
-	static uint8_t result[ADC_FRAME_SIZE]; // Use static buffer to avoid stack overflow
-	memset(result, 0xCC, ADC_FRAME_SIZE);
-	while (true) {
-		ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-		while (true) {
-
-			esp_err_t ret = adc_continuous_read(handle, result, ADC_FRAME_SIZE, &resN, 100);
-
-			if (ret == ESP_OK) {
-				double totval = 0;
-				uint32_t frameCount = 0;
-				for (int i = 0; i < resN; i += SOC_ADC_DIGI_RESULT_BYTES) {
-					adc_digi_output_data_t *p = (adc_digi_output_data_t*)&result[i];
-					uint32_t chan_num = p->type2.channel;
-					uint32_t data = p->type2.data;
-					/* Check the channel number validation, the data is invalid if the channel num exceed the maximum channel */
-					if (chan_num != ADC_CHANNEL_0) {
-						ESP_LOGW(TAG, "Invalid data [%lu_%lu]", chan_num, data);
-					} else {
-						totval += data;
-						frameCount++;
-					}
-				}
-				if (frameCount == 0) {
-					ESP_LOGE(TAG, "No valid data frames received");
-					break;
-				}
-				uint32_t maxVal = 0xFFF;
-				uint32_t inputVal = (totval / frameCount);
-				uint32_t d = 255 * ((double)inputVal / maxVal);
-				uint8_t dutyCycle = (uint8_t)MIN(0xFF, d);
-				uint8_t currentDuty = telemetry->fanDuty.get();
-				int16_t diff = abs((int16_t)dutyCycle - (int16_t)currentDuty);
-				if (abs((int16_t)dutyCycle - (int16_t)currentDuty) > 0) {
-					ESP_LOGD(TAG, "New duty: %u (val: %lu, max: %lu, max_vin: %.02f, max_ref: %.02f, frameCount: %lu, totVal: %.02f, diff: %d)", dutyCycle, inputVal, maxVal, ADC_MAX_INPUT_VOLTAGE, ADC_MAX_REF_VOLTAGE, frameCount, totval, diff);
-				}
-				telemetry->fanDuty.set(dutyCycle);
-
-				vTaskDelay(pdMS_TO_TICKS(250));
-			} else if (ret == ESP_ERR_TIMEOUT) {
-				// Not an error: this is how the inner loop ends. The DMA buffer
-				// has been drained, so go back to waiting for the conversion-done
-				// notification that refills it. Logging it at ERROR made a normal
-				// control-flow event look like a fault, and shipped it to
-				// ThingsBoard as one.
-				ESP_LOGD(TAG, "ADC frame buffer drained, waiting for the next conversion");
-				break;
-			} else if (ret == ESP_ERR_INVALID_STATE) {
-				ESP_LOGE(TAG, "ADC continuous mode driver state is invalid");
-				break;
-			}
-		}
 	}
 }
 
@@ -409,6 +246,14 @@ static bool publish_telemetry(JsonBuilder* jb) {
 	// controlled variable to whole percent -- in exactly the graph you would
 	// use to see whether the control loop is behaving.
 	jb->add("humidity", (double)(telemetry->humidity.get()), 1);
+	// Null rather than a fabricated zero when no probe is fitted or it has
+	// stopped answering: a chart with a gap in it is honest, a chart pinned to
+	// 0 C looks like a frozen plate.
+	if (PlateProbe::isFresh()) {
+		jb->add("plate_temperature", (double)(telemetry->plateTemperature.get()), 1);
+	} else if (PlateProbe::isConfigured()) {
+		jb->addNull("plate_temperature");
+	}
 	jb->endObject();
 	return publish_json("v1/devices/me/telemetry", jb);
 }
@@ -431,6 +276,10 @@ static bool publish_attributes(JsonBuilder* jb) {
 	jb->beginObject();
 	jb->add("fan_running", attributes->fanRunning.get());
 	jb->add("fan_enabled", attributes->fanEnabled.get());
+	jb->add("vent_state", Ventilation::stateName((VentState)attributes->ventState.get()));
+	jb->add("vent_next_seconds", (int32_t)attributes->ventNextSeconds.get());
+	jb->add("plate_probe", PlateProbe::description());
+	jb->add("fan_stalled", attributes->fanStalled.get());
 	jb->add("ram_free", get_ram_free());
 	jb->add("ram_total", get_ram_total());
 	jb->endObject();
@@ -460,67 +309,6 @@ static void publish_attributes_task(void* arg) {
 	}
 }
 
-// Latches the stale-reading warning so it is logged on entry and exit rather
-// than every five seconds for as long as the sensor is down.
-static bool s_climate_stale_logged = false;
-
-static void control_loop_task(void* arg) {
-	while (true) {
-		bool fanEnabled = attributes->fanEnabled.get();
-		bool newFanEnabled = fanEnabled;
-		// Read once: an attribute update landing between two reads would send
-		// this iteration down a different branch than it started in.
-		const bool ctrlLoopEnabled = shared_attributes->ctrlLoopEnabled.get();
-		if (ctrlLoopEnabled && climate_is_stale()) {
-			// The fan raises humidity, so the failure that matters is leaving it
-			// running against a number that stopped updating -- that humidifies
-			// blind, and over-humidifying a curing chamber grows mould. Holding
-			// it off is the recoverable direction: the chamber dries out slowly
-			// and visibly instead.
-			newFanEnabled = false;
-			if (!s_climate_stale_logged) {
-				if (s_climate_ever_ok) {
-					ESP_LOGW(TAG, "No climate reading for over %u s; holding the fan off",
-							 (unsigned)(CLIMATE_STALE_MS / 1000));
-				} else {
-					// Normal for the first seconds after boot: the loop runs
-					// before climate_sensor_task has completed a measurement.
-					ESP_LOGI(TAG, "No climate reading yet; holding the fan off");
-				}
-				s_climate_stale_logged = true;
-			}
-		} else if (ctrlLoopEnabled) {
-			if (s_climate_stale_logged) {
-				ESP_LOGI(TAG, "Climate readings are current again; resuming control");
-				s_climate_stale_logged = false;
-			}
-			float humidity = telemetry->humidity.get();
-			float humiditySetpoint = shared_attributes->humiditySetpoint.get();
-			float humidityOvershootLimit = shared_attributes->humidityOvershootLimit.get();
-			float humidityUndershootLimit = shared_attributes->humidityUndershootLimit.get();
-			float upperLimit = humiditySetpoint + humidityOvershootLimit;
-			float lowerLimit = humiditySetpoint - humidityUndershootLimit;
-			if (
-				( fanEnabled && humidity >= upperLimit) ||
-				(!fanEnabled && humidity <= lowerLimit)) {
-				newFanEnabled = !fanEnabled;
-				ESP_LOGI(TAG, "Humidity outside thresholds [%.01f%%, %.01f%%] with value %.02f%%, %s fan.", lowerLimit, upperLimit, humidity, newFanEnabled ? "enabling" : "disabling");
-			}
-		} else {
-			newFanEnabled = shared_attributes->fanEnabled.get();
-			if (fanEnabled != newFanEnabled) {
-				ESP_LOGI(TAG, "Fan changed to %s", newFanEnabled ? "enabled" : "disabled");
-			}
-		}
-
-		gpio_set_level(D2, newFanEnabled ? 1 : 0);
-		attributes->fanEnabled.set(newFanEnabled);
-		// fan_task owns the EMC2101; take its published reading rather than
-		// issuing a concurrent I2C transaction from this task.
-		attributes->fanRunning.set(telemetry->fanRPM.get() > 0);
-		vTaskDelay(pdMS_TO_TICKS(5000));
-	}
-}
 /**
  * @brief Stop with a repeating explanation when NVS holds no credentials.
  *
@@ -583,6 +371,7 @@ extern "C" void app_main(void) {
 	// MQTT_CONNECTED_BIT, and its lock exists before any attributes can arrive.
 	OtaUpdater::begin();
 	wifi_setup();
+	TimeSync::begin();
 	mqtt_setup();
 
 	// Initialize I2C bus
@@ -616,35 +405,9 @@ extern "C" void app_main(void) {
 		ESP_LOGI(TAG, "FanTask created successfully.");
 	}
 
-	// ADC task
-	result = xTaskCreate(
-		adc_task,                // Task function
-		"ADCTask",               // Task name (for debugging)
-		8192,                    // Stack size (in words)
-		nullptr,                 // Task input parameter
-		tskIDLE_PRIORITY + 1,    // Priority (above idle)
-		&adc_task_handle
-	);
-	if (result != pdPASS) {
-		ESP_LOGE(TAG, "Failed to create ADCTask");
-	} else {
-		ESP_LOGI(TAG, "ADCTask created successfully.");
-	}
-
-	// Climate sensor task
-	result = xTaskCreate(
-		climate_sensor_task,         // Task function
-		"ClimateSensorTask",         // Task name (for debugging)
-		8192,                        // Stack size (in words)
-		nullptr,                     // Task input parameter
-		tskIDLE_PRIORITY + 1,        // Priority (above idle)
-		&climate_sensor_task_handle  // Task handle
-	);
-	if (result != pdPASS) {
-		ESP_LOGE(TAG, "Failed to create ClimateSensorTask");
-	} else {
-		ESP_LOGI(TAG, "ClimateSensorTask created successfully.");
-	}
+	Potentiometer::begin();
+	ClimateSensor::begin();
+	PlateProbe::begin();
 
 	result = xTaskCreate(
 		telemetry_task,              // Task function
@@ -674,19 +437,7 @@ extern "C" void app_main(void) {
 		ESP_LOGI(TAG, "PublishAttributesTask created successfully.");
 	}
 
-	result = xTaskCreate(
-		control_loop_task,           // Task function
-		"ControlLoopTask",           // Task name (for debugging)
-		8192,                        // Stack size (in words)
-		nullptr,                     // Task input parameter
-		tskIDLE_PRIORITY + 3,        // Priority (above idle)
-		&control_loop_task_handle       // Task handle
-	);
-	if (result != pdPASS) {
-		ESP_LOGE(TAG, "Failed to create ControlLoopTask");
-	} else {
-		ESP_LOGI(TAG, "ControlLoopTask created successfully.");
-	}
+	Ventilation::begin();
 
 	ram_log_snapshot("setup complete");
 }
