@@ -90,8 +90,19 @@ States: `idle` → `pending` → `running` → `settling`.
 A slot comes due every `vent_interval_hours`, aligned to `vent_first_hour_local` when the
 clock is synced and to time since boot when it is not. The burst then has to get past the
 plate gate: if a probe is fitted and reads below `plate_gate_temp_c` — or has gone stale,
-which is treated as cold — the burst waits in `pending` until the plate warms, or until
-`vent_max_defer_minutes` runs out and it goes ahead anyway. After a burst the machine
+which is treated as cold — the burst waits in `pending` until the plate warms.
+
+What happens if it never warms depends on *why* the burst was asked for. Air exchange has
+to happen eventually, so a scheduled or make-up burst goes ahead anyway once
+`vent_max_defer_minutes` runs out. A humidity burst never does: forcing moist air onto
+sub-zero metal is the mechanism that armoured the evaporator in the first place, and
+nothing goes wrong if it waits, because the fan cannot dry the chamber — a humidity burst
+that never runs is one that was not needed.
+
+There is no daily cap on humidity-driven bursts. Burst-then-settle is already the bound:
+90 s of fan per 20 minutes of settling is a ceiling of about 7% duty even with humidity
+pinned at the floor, which is a different animal from a controller that held the fan on
+for hours. After a burst the machine
 sits in `settling` for `vent_settle_minutes`, long enough for the chamber to mix and the
 SHT31 to catch up, before any new trigger is considered.
 
@@ -100,7 +111,7 @@ Four things can trigger a burst:
 | Trigger | Condition |
 |---|---|
 | scheduled | the interval elapsed |
-| dry | humidity below `humidity_setpoint − humidity_undershoot_limit`, capped at `vent_max_dry_bursts_per_day` |
+| dry | humidity below `humidity_setpoint − humidity_undershoot_limit` |
 | make-up | the day's fan time is behind the prorated share of `vent_min_seconds_per_day` |
 | manual | `vent_now` set in ThingsBoard — bypasses the plate gate |
 
@@ -192,7 +203,6 @@ is *not* persisted — see [Flash wear](#flash-wear):
 | `vent_burst_seconds` | `90.0` | Length of one burst |
 | `vent_settle_minutes` | `20.0` | Quiet period after a burst before any new trigger |
 | `vent_min_seconds_per_day` | `180.0` | Daily floor of fan time, spread across the day |
-| `vent_max_dry_bursts_per_day` | `6` | Cap on extra humidity-driven bursts |
 | `vent_max_defer_minutes` | `360.0` | How long a cold plate may hold a burst back |
 | `vent_min_duty_percent` | `30` | Minimum fan duty while a burst runs, regardless of the knob |
 | `plate_gate_temp_c` | `2.0` | Plate temperature a burst needs to see before it runs |

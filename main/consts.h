@@ -95,7 +95,6 @@ public:
 	AtomicVariable<double> ventBurstSeconds;
 	AtomicVariable<double> ventSettleMinutes;
 	AtomicVariable<double> ventMaxDeferMinutes;
-	AtomicVariable<int32_t> ventMaxDryBurstsPerDay;
 	/// Floor on total fan seconds per day, topped up with extra bursts spread
 	/// through the day when humidity has not asked for enough air on its own.
 	AtomicVariable<double> ventMinSecondsPerDay;
@@ -124,7 +123,6 @@ public:
 		ventBurstSeconds(90.0, "vbs", onChange, this),
 		ventSettleMinutes(20.0, "vsm", onChange, this),
 		ventMaxDeferMinutes(360.0, "vmd", onChange, this),
-		ventMaxDryBurstsPerDay(6, "mdb", onChange, this),
 		// Matches what the default schedule already delivers (2 x 90 s), so it
 		// is inert until raised.
 		ventMinSecondsPerDay(180.0, "vms", onChange, this),

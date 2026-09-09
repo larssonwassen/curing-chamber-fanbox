@@ -104,7 +104,7 @@ void request_attributes(void) {
 		"ota_on_dev_build,"
 		"humidity_setpoint,humidity_undershoot_limit,"
 		"vent_now,vent_interval_hours,vent_first_hour_local,vent_burst_seconds,"
-		"vent_settle_minutes,vent_max_defer_minutes,vent_max_dry_bursts_per_day,"
+		"vent_settle_minutes,vent_max_defer_minutes,"
 		"vent_min_seconds_per_day,vent_min_duty_percent,plate_gate_temp_c,"
 		"fw_title,fw_version,fw_size,fw_checksum,fw_checksum_algorithm";
 
@@ -182,7 +182,6 @@ static void handle_mqtt_message(const char* topic, char* data, size_t len) {
 	handle_int_attribute(jp, dataRoot, "uart_log_level", shared_attributes->uartLogLevel);
 	handle_int_attribute(jp, dataRoot, "streamer_log_level", shared_attributes->streamerLogLevel);
 	handle_int_attribute(jp, dataRoot, "vent_first_hour_local", shared_attributes->ventFirstHourLocal);
-	handle_int_attribute(jp, dataRoot, "vent_max_dry_bursts_per_day", shared_attributes->ventMaxDryBurstsPerDay);
 	handle_int_attribute(jp, dataRoot, "vent_min_duty_percent", shared_attributes->ventMinDutyPercent);
 
 	// Handle boolean attributes

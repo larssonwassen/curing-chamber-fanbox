@@ -35,7 +35,6 @@ VentilationSettings read_settings(void) {
 	cfg.settleMinutes = (float)shared_attributes->ventSettleMinutes.get();
 	cfg.plateGateC = (float)shared_attributes->plateGateTempC.get();
 	cfg.maxDeferMinutes = (float)shared_attributes->ventMaxDeferMinutes.get();
-	cfg.maxDryBurstsPerDay = (int)shared_attributes->ventMaxDryBurstsPerDay.get();
 	cfg.minSecondsPerDay = (float)shared_attributes->ventMinSecondsPerDay.get();
 	cfg.humiditySetpoint = (float)shared_attributes->humiditySetpoint.get();
 	cfg.humidityUndershoot = (float)shared_attributes->humidityUndershootLimit.get();
