@@ -23,7 +23,8 @@ The safeguards that follow from that:
 - Every burst has an end. Nothing in the state machine can hold the fan on indefinitely.
 - An optional probe on the evaporator plate lets a cold plate **defer** a burst until it
   warms and drains, up to a bounded timeout.
-- Extra humidity-driven bursts are capped per day.
+- A burst is not a commitment. Its reasons are re-read on every tick, so a plate that goes
+  cold or a chamber that stops being dry ends the burst early.
 - A daily minimum of fan time is spread across the day, so a chamber that never asks for
   air still gets some.
 
@@ -98,6 +99,33 @@ to happen eventually, so a scheduled or make-up burst goes ahead anyway once
 sub-zero metal is the mechanism that armoured the evaporator in the first place, and
 nothing goes wrong if it waits, because the fan cannot dry the chamber — a humidity burst
 that never runs is one that was not needed.
+
+**Nothing latches.** The policy keeps history — when the last burst ran, which slot has
+been served, how much fan time the day has had — but not intent. A burst that is owed and
+a burst that is running both re-read the plate and the humidity every second, and stop as
+soon as their reasons stop holding. This is not a refinement; it is the difference between
+the gate working and the gate being decorative. Two failures on the real chamber came from
+the earlier latching version:
+
+- A burst started the instant the plate touched the gate on its way up, the compressor cut
+  back in, and the fan kept running for another 85 seconds while the plate dived to
+  −2.6 °C — pushing moist room air onto sub-zero metal, which is the exact event the gate
+  exists to prevent.
+- A humidity burst raised at 63% RH waited seven minutes for the plate and then fired into
+  a chamber that had climbed to 72.7%, above its own setpoint. Humidity rises steeply
+  exactly while a burst is pending, because the same warming plate that opens the gate is
+  giving its frost back to the air.
+
+Re-reading conditions continuously invites the opposite failure — a condition sitting on
+its threshold cycling the fan at the loop rate — so three things bound it. A humidity burst
+is *raised* at `humidity_setpoint - humidity_undershoot_limit` but *held* until
+`humidity_setpoint`, which is a deadband made of numbers that were already configured. The
+plate must fall 0.3 °C below `plate_gate_temp_c` before it cuts a running burst, which is
+three counts of the DS18B20's resolution and so cannot be triggered by quantisation noise.
+And no burst may be stopped inside its first five seconds, whatever the reason. A burst
+that overrode the gate to start — a manual request, or a scheduled one deferred past
+`vent_max_defer_minutes` — is not subject to the gate afterwards, since cutting it off on
+the first tick would amount to never having forced it through.
 
 There is no daily cap on humidity-driven bursts. Burst-then-settle is the bound, and how
 tight a bound depends on `vent_settle_minutes`: at the 1.5-minute default a chamber with
