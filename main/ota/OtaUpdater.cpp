@@ -354,6 +354,24 @@ void OtaUpdater::subscribe(void) {
 	}
 }
 
+/// True when the running image was built somewhere other than a tag.
+///
+/// PROJECT_VER comes from `git describe`, so a release version is only digits
+/// and dots. Anything else -- a commit count, an abbreviated hash, "-dirty",
+/// or the "0.0.0-dev" fallback for a build with no git at all -- means the
+/// image was built by hand.
+static bool isDevelopmentBuild(const char* version) {
+	if (version == nullptr || *version == '\0') {
+		return true;
+	}
+	for (const char* p = version; *p != '\0'; p++) {
+		if ((*p < '0' || *p > '9') && *p != '.') {
+			return true;
+		}
+	}
+	return false;
+}
+
 void OtaUpdater::onAttributes(JsonParser& jp, int root) {
 	char title[sizeof(g.title)];
 	char version[sizeof(g.version)];
@@ -395,6 +413,31 @@ void OtaUpdater::onAttributes(JsonParser& jp, int root) {
 	}
 	if (strcmp(version, app->version) == 0) {
 		ESP_LOGD(TAG, "Already running %s %s", title, version);
+		return;
+	}
+
+	// A build flashed over USB is not a release, and installing over it is
+	// almost never what the person holding the cable wanted: the device
+	// connects, sees an assigned package whose version differs from the build
+	// just flashed, and replaces it about forty seconds later. The flash
+	// succeeds, the log looks right, and the firmware under test is gone before
+	// anything can be observed.
+	//
+	// The version string already says which kind of build this is, because it
+	// comes from git describe: a release is exactly "0.5.1", while a bench
+	// build carries what it is off the tag, "0.5.1-2-gab12cd3-dirty".
+	//
+	// Declining is the safe default rather than the safe answer, so it is not
+	// the final word: a dev build sealed inside a chamber still has to be
+	// rescuable without opening it, which is what ota_on_dev_build is for.
+	if (isDevelopmentBuild(app->version) && !shared_attributes->otaOnDevBuild.get()) {
+		static bool warned = false;
+		if (!warned) {
+			warned = true;
+			ESP_LOGW(TAG, "Refusing %s %s: this is a development build (%s). "
+						  "Set ota_on_dev_build to override.",
+					 title, version, app->version);
+		}
 		return;
 	}
 

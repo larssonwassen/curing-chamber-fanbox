@@ -94,10 +94,24 @@ void request_attributes(void) {
 	char topic[64];
 	snprintf(topic, sizeof(topic), "v1/devices/me/attributes/request/%d", ++request_attributes_request_id);
 
-	char payload[256];
+	// Every shared attribute the device reads has to be named here or a reboot
+	// will not learn its stored value: pushes arrive on change, but this request
+	// is the only thing that fetches what ThingsBoard already holds. A key
+	// missing from this list looks like it works, because NVS still has
+	// whatever the device saw last time it was online.
+	static const char SHARED_KEYS[] =
+		"uart_log_level,streamer_log_level,fan_enabled,ctrl_loop_enabled,"
+		"ota_on_dev_build,"
+		"humidity_setpoint,humidity_undershoot_limit,"
+		"vent_now,vent_interval_hours,vent_first_hour_local,vent_burst_seconds,"
+		"vent_settle_minutes,vent_max_defer_minutes,vent_max_dry_bursts_per_day,"
+		"vent_min_seconds_per_day,vent_min_duty_percent,plate_gate_temp_c,"
+		"fw_title,fw_version,fw_size,fw_checksum,fw_checksum_algorithm";
+
+	char payload[sizeof(SHARED_KEYS) + 64];
 	JsonBuilder jb(payload, sizeof(payload));
 	jb.beginObject();
-	jb.add("sharedKeys", "uart_log_level,streamer_log_level,fan_enabled,ctrl_loop_enabled,humidity_setpoint,humidity_overshoot_limit,humidity_undershoot_limit,fw_title,fw_version,fw_size,fw_checksum,fw_checksum_algorithm");
+	jb.add("sharedKeys", SHARED_KEYS);
 	jb.endObject();
 	if (!jb.finalize()) {
 		ESP_LOGE(TAG, "Failed to build attributes request message");
@@ -175,6 +189,7 @@ static void handle_mqtt_message(const char* topic, char* data, size_t len) {
 	handle_bool_attribute(jp, dataRoot, "fan_enabled", shared_attributes->fanEnabled);
 	handle_bool_attribute(jp, dataRoot, "ctrl_loop_enabled", shared_attributes->ctrlLoopEnabled);
 	handle_bool_attribute(jp, dataRoot, "vent_now", shared_attributes->ventNow);
+	handle_bool_attribute(jp, dataRoot, "ota_on_dev_build", shared_attributes->otaOnDevBuild);
 
 	// Handle floating point attributes
 	handle_number_attribute(jp, dataRoot, "humidity_setpoint", shared_attributes->humiditySetpoint);

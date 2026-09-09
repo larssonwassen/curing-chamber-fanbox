@@ -57,7 +57,7 @@ Board photos are in `ESP32-S3-Nano_Version3.jpg` and `ESP32-S3-Nano_Version4.jpg
 | I²C SCL | `A5` | 12 |
 | Potentiometer | `A0` | 1 |
 | Fan enable | `D2` | 5 |
-| Plate probe 1-Wire | `D3` | 6 |
+| Plate probe 1-Wire | `D13` | 48 |
 
 Full board mapping is in [`main/pins.h`](main/pins.h).
 
@@ -127,13 +127,18 @@ Configure it under `idf.py menuconfig` → *Curing chamber fanbox*, or in
 
 ```
 CONFIG_PLATE_PROBE_DS18B20=y
-CONFIG_PLATE_PROBE_GPIO=6
+CONFIG_PLATE_PROBE_GPIO=48
 ```
 
-Wiring is three conductors: data to the configured GPIO, plus 3V3 and ground. **A 4.7 kΩ
-pull-up from the data line to 3V3 is required** — the driver does not enable an internal
-one and the bus does not work reliably without it. Do not use GPIO 5 (`D2`), which
-switches the fan, or GPIO 33-37, which carry the octal PSRAM.
+Wiring is three conductors: data to the configured GPIO, plus 3V3 and ground. The
+internal pull-up is enabled, so no external resistor is needed over a short lead — but it
+is roughly 45 kΩ where 1-Wire wants 4.7 kΩ, and a long probe cable adds capacitance that
+rounds off the rising edge until a one is sampled as a zero. That shows up as intermittent
+bad reads rather than a dead bus, so **fit a 4.7 kΩ resistor from data to 3V3 if the probe
+reads erratically** before suspecting the probe itself.
+
+GPIO 48 is also `SCK`, which costs nothing here because this firmware uses no SPI. Do not
+use GPIO 5 (`D2`), which switches the fan, or GPIO 33-37, which carry the octal PSRAM.
 
 A probe that appears after boot is picked up on a later sweep, so the firmware can be
 flashed before the probe is wired. A reading older than 30 s is reported as stale, which
@@ -179,6 +184,7 @@ is *not* persisted — see [Flash wear](#flash-wear):
 | Key | Default | Meaning |
 |---|---|---|
 | `ctrl_loop_enabled` | `true` | Automatic ventilation; when false, `fan_enabled` is obeyed directly |
+| `ota_on_dev_build` | `false` | Let an OTA package install over a hand-flashed build |
 | `fan_enabled` | `true` | Manual fan state, used when automatic ventilation is off |
 | `vent_now` | `false` | Rising edge ventilates immediately, ignoring the plate gate. Not persisted |
 | `vent_interval_hours` | `12.0` | How often a scheduled burst comes due |
@@ -210,8 +216,37 @@ idf.py -p /dev/cu.usbmodemXXXX flash monitor
 ```
 
 `sdkconfig` is generated from [`sdkconfig.defaults`](sdkconfig.defaults) and is not
-committed. Neither is `version.txt`, which CI writes so the build container does not have
-to run git; a local build calls `git describe` itself.
+committed.
+
+#### Flashing over USB while an OTA package is assigned
+
+A hand-flashed build declines OTA updates. Without that, bench-testing a change is a race
+the cable loses: `idf.py flash` writes `ota_0`, the bootloader may still be pointed at
+`ota_1`, and even after `idf.py erase-otadata` the device connects, sees an assigned
+package whose version differs from the build just flashed, and re-installs it about forty
+seconds later:
+
+```
+ota: Updating curing-chamber-fanbox 0.5.0-dirty -> 0.5.0 (1133840 bytes into ota_1)
+```
+
+The flash succeeds, the log looks right, and the firmware under test is gone before
+anything can be observed.
+
+The version string is what distinguishes the two: a release is exactly `0.5.1`, and a
+build off a tag carries the rest of `git describe`, `0.5.1-2-gab12cd3-dirty`. Anything
+that is not digits and dots is treated as a development build, `0.0.0-dev` included.
+
+Set the `ota_on_dev_build` shared attribute to override it. That exists because declining
+is a safe default rather than a safe answer: a hand-flashed build sealed inside a chamber
+still has to be recoverable without opening it.
+
+Flashing over a slot the bootloader is not pointed at is a separate trap, and
+`erase-otadata` is the fix:
+
+```bash
+idf.py erase-otadata flash monitor
+```
 
 ### Credentials
 
