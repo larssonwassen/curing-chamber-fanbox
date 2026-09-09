@@ -90,9 +90,6 @@ bool VentilationPolicy::dryRequest(const VentilationInputs& in, const Ventilatio
 		// loop could.
 		return false;
 	}
-	if (cfg.maxDryBurstsPerDay > 0 && dryBursts_ >= cfg.maxDryBurstsPerDay) {
-		return false;
-	}
 	if (everBurst_) {
 		const uint32_t settleMs = (uint32_t)(cfg.settleMinutes * 60000.0f);
 		if (elapsed_ms(in.nowMs, burstEndedMs_) < settleMs) {
@@ -168,13 +165,19 @@ VentilationDecision VentilationPolicy::update(const VentilationInputs& in, const
 		// A burst is owed. Hold it while the plate is below freezing-ish, so
 		// the moisture we bring in has somewhere to go other than straight onto
 		// the coldest surface in the box.
-		const bool expired = elapsed_ms(in.nowMs, pendingSinceMs_) >= (uint32_t)(cfg.maxDeferMinutes * 60000.0f);
+		// The timeout exists so a cold plate cannot hold *air exchange* off
+		// forever: stale air is a real problem, and a burst owed since this
+		// morning has to happen eventually. Humidity is not that. Forcing a
+		// humidity burst onto sub-zero metal is precisely the mechanism that
+		// armoured the evaporator in the first place, and unlike fresh air,
+		// nothing goes wrong if it simply waits -- the fan cannot dry the
+		// chamber, so a burst it never gets is a burst it did not need.
+		const bool mayForce = trigger_ != VentTrigger::Dry;
+		const bool expired = mayForce &&
+			elapsed_ms(in.nowMs, pendingSinceMs_) >= (uint32_t)(cfg.maxDeferMinutes * 60000.0f);
 		if (plateAllows(in, cfg) || expired) {
 			state_ = VentState::Running;
 			burstStartedMs_ = in.nowMs;
-			if (trigger_ == VentTrigger::Dry) {
-				dryBursts_++;
-			}
 			d.fanOn = true;
 			d.state = state_;
 			d.trigger = trigger_;
@@ -235,9 +238,6 @@ VentilationDecision VentilationPolicy::update(const VentilationInputs& in, const
 	if (plateAllows(in, cfg)) {
 		state_ = VentState::Running;
 		burstStartedMs_ = in.nowMs;
-		if (want == VentTrigger::Dry) {
-			dryBursts_++;
-		}
 		d.fanOn = true;
 		d.reason = want == VentTrigger::Scheduled ? "scheduled burst"
 				 : want == VentTrigger::Makeup    ? "daily minimum burst"
@@ -275,7 +275,6 @@ void VentilationPolicy::rollDayWindow(const VentilationInputs& in) {
 		}
 		if (day != dayIndex_) {
 			dayIndex_ = day;
-			dryBursts_ = 0;
 			dayRunMs_ = 0;
 			dayStartFraction_ = 0.0f;
 		}
@@ -289,7 +288,6 @@ void VentilationPolicy::rollDayWindow(const VentilationInputs& in) {
 	}
 	if (elapsed_ms(in.nowMs, dayWindowStartMs_) >= (uint32_t)SECONDS_PER_DAY * 1000u) {
 		dayWindowStartMs_ = in.nowMs;
-		dryBursts_ = 0;
 		dayRunMs_ = 0;
 	}
 }

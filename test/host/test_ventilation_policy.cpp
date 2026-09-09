@@ -32,10 +32,9 @@ VentilationSettings defaults(void) {
 	cfg.intervalHours = 12.0f;
 	cfg.firstHourLocal = 6;
 	cfg.burstSeconds = 90.0f;
-	cfg.settleMinutes = 20.0f;
+	cfg.settleMinutes = 1.5f;
 	cfg.plateGateC = 2.0f;
 	cfg.maxDeferMinutes = 360.0f;
-	cfg.maxDryBurstsPerDay = 6;
 	cfg.humiditySetpoint = 75.0f;
 	cfg.humidityUndershoot = 5.0f;
 	cfg.minSecondsPerDay = 180.0f;
@@ -160,12 +159,45 @@ int main(void) {
 	}
 
 	{
+		// There is no daily cap on humidity-driven bursts, and none is needed:
+		// burst-then-settle is itself the bound. 90 s of fan per 20 min of
+		// settling is a ceiling of about 7% duty, which is a different animal
+		// from the old controller holding the fan on for hours.
 		VentilationPolicy p;
 		VentilationInputs in = nominal(0);
 		in.humidity = 60.0f;
 		uint32_t fan = runFor(p, cfg, in, 20 * HOUR);
-		// Six dry bursts plus one scheduled burst, at 90 s each.
-		check(fan <= 7 * 91, "dry bursts are capped for the day");
+		const uint32_t ceiling = 20 * 3600 * 90 / (90 + 90);
+		check(fan <= ceiling + 91, "burst-and-settle bounds a permanently dry chamber");
+		check(fan > 6 * 91, "...without an arbitrary daily cap cutting it short");
+	}
+
+	{
+		// The hole this replaced the cap with: the defer timeout used to apply
+		// to every trigger, so a humidity burst held back by a frozen plate was
+		// forced through after maxDeferMinutes anyway -- onto the exact surface
+		// the gate exists to protect.
+		VentilationPolicy p;
+		VentilationInputs in = nominal(0);
+		in.humidity = 55.0f;
+		in.plateConfigured = true;
+		in.plateValid = true;
+		in.plateC = -9.0f;
+		uint32_t fan = runFor(p, cfg, in, 20 * HOUR);
+		check(fan == 0, "a dry chamber never forces air onto a sub-zero plate");
+	}
+
+	{
+		// Scheduled air is different: stale air is a real problem, so a burst
+		// owed since this morning goes ahead even if the plate stays cold.
+		VentilationPolicy p;
+		VentilationInputs in = nominal(0);
+		in.humidity = 78.0f; // in band, so only the schedule can trigger
+		in.plateConfigured = true;
+		in.plateValid = true;
+		in.plateC = -9.0f;
+		uint32_t fan = runFor(p, cfg, in, 20 * HOUR);
+		check(fan > 0, "scheduled air still forces through after the defer timeout");
 	}
 
 	{
@@ -248,15 +280,27 @@ int main(void) {
 	}
 
 	{
-		// Humidity-driven air counts towards the minimum: a chamber that is
-		// already getting plenty of air should not get more on top.
-		VentilationSettings c = defaults();
-		c.minSecondsPerDay = 900.0f;
-		VentilationPolicy p;
-		VentilationInputs in = nominal(0);
-		in.humidity = 60.0f;
-		uint32_t fan = runFor(p, c, in, 24 * HOUR);
-		check(fan <= 1100, "dry-driven bursts count towards the daily minimum");
+		// Humidity-driven air counts towards the minimum: a chamber already
+		// getting plenty of air should not get make-up bursts on top. Checked
+		// as a comparison rather than against a number, because with no daily
+		// cap a permanently dry chamber runs the burst-and-settle cycle all
+		// day and the absolute figure says nothing on its own.
+		VentilationSettings none = defaults();
+		none.minSecondsPerDay = 0.0f;
+		VentilationPolicy p1;
+		VentilationInputs in1 = nominal(0);
+		in1.humidity = 60.0f;
+		const uint32_t withoutMinimum = runFor(p1, none, in1, 24 * HOUR);
+
+		VentilationSettings with = defaults();
+		with.minSecondsPerDay = 900.0f;
+		VentilationPolicy p2;
+		VentilationInputs in2 = nominal(0);
+		in2.humidity = 60.0f;
+		const uint32_t withMinimum = runFor(p2, with, in2, 24 * HOUR);
+
+		check(withMinimum == withoutMinimum,
+			  "dry-driven bursts count towards the daily minimum");
 	}
 
 	// ---- Timer wrap -------------------------------------------------------

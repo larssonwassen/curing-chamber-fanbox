@@ -49,10 +49,9 @@ struct VentilationSettings {
 	float intervalHours = 12.0f;     ///< Spacing of scheduled bursts.
 	int   firstHourLocal = 6;        ///< Local hour anchoring the schedule.
 	float burstSeconds = 90.0f;      ///< How long the fan runs per burst.
-	float settleMinutes = 20.0f;     ///< Quiet time before humidity may ask again.
+	float settleMinutes = 1.5f;      ///< Quiet time before humidity may ask again.
 	float plateGateC = 2.0f;         ///< Hold bursts while the plate is colder.
 	float maxDeferMinutes = 360.0f;  ///< Give up gating and ventilate anyway.
-	int   maxDryBurstsPerDay = 6;    ///< Cap on humidity-requested bursts.
 	/// Floor on total fan time per day. Every burst counts towards it,
 	/// whatever triggered it, and the shortfall is topped up with extra bursts
 	/// spread across the day rather than saved for a lump at midnight.
@@ -106,7 +105,6 @@ public:
 	/// running. Only meaningful without a clock; with one, the schedule is
 	/// absolute and this is an estimate.
 	uint32_t msUntilScheduled(const VentilationInputs& in, const VentilationSettings& cfg) const;
-	int dryBurstsToday() const { return dryBursts_; }
 	/// Fan seconds accumulated in the current day window.
 	uint32_t secondsToday() const { return dayRunMs_ / 1000; }
 
@@ -138,7 +136,6 @@ private:
 	// The day window. With a clock this is the local calendar day, so the
 	// counters reset at local midnight; without one it is a rolling 24 hours
 	// from boot. Both the dry-burst cap and the daily minimum hang off it.
-	int      dryBursts_ = 0;
 	uint32_t dayRunMs_ = 0;
 	uint32_t dayWindowStartMs_ = 0;
 	bool     dayWindowSet_ = false;
