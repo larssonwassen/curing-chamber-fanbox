@@ -283,6 +283,113 @@ static bool publish_attributes(JsonBuilder* jb) {
 	jb->endObject();
 	return publish_json("v1/devices/me/attributes", jb);
 }
+// Control state and the settings that shape it, published as telemetry rather
+// than attributes so they have a history.
+//
+// ThingsBoard keeps only the current value of an attribute, which is fine for
+// something you read off a tile and useless for the question that actually
+// comes up: what was the controller doing at 03:00, and what was it configured
+// to do at the time. A setpoint changed three days ago is invisible in a chart
+// of the last hour unless it was recorded as a series.
+//
+// Published on change only. These are step functions -- a setpoint holds for
+// days, a ventilation state for minutes -- and sampling them every five seconds
+// alongside the sensors would store the same number a million times to describe
+// an event that happened twice.
+// Compared with memcmp, which is safe here for two reasons worth stating: every
+// instance is value-initialised, so padding bytes are zero rather than whatever
+// was on the stack, and comparing doubles bitwise is what we want anyway -- a
+// NaN that somehow reached a setpoint compares equal to itself this way, where
+// == would report a change every second forever.
+struct ControlSnapshot {
+	int32_t ventState;
+	int32_t gateBlocked;
+	int32_t ctrlLoopEnabled;
+	int32_t ventFirstHourLocal;
+	int32_t ventMinDutyPercent;
+	double  humiditySetpoint;
+	double  humidityUndershootLimit;
+	double  plateGateTempC;
+	double  ventIntervalHours;
+	double  ventBurstSeconds;
+	double  ventSettleMinutes;
+	double  ventMaxDeferMinutes;
+	double  ventMinSecondsPerDay;
+};
+
+static ControlSnapshot read_control_snapshot(void) {
+	ControlSnapshot c = {};
+	const VentState state = (VentState)attributes->ventState.get();
+	c.ventState = (int32_t)state;
+	// Pending is exactly "a burst is owed and the plate is too cold to take
+	// it". Published separately because it is the question the plate probe was
+	// fitted to answer -- how much of the day ventilation is being vetoed --
+	// and it cannot be recovered from fan_rpm, which is zero either way.
+	c.gateBlocked = state == VentState::Pending ? 1 : 0;
+	c.ctrlLoopEnabled = shared_attributes->ctrlLoopEnabled.get() ? 1 : 0;
+	c.ventFirstHourLocal = shared_attributes->ventFirstHourLocal.get();
+	c.ventMinDutyPercent = shared_attributes->ventMinDutyPercent.get();
+	c.humiditySetpoint = shared_attributes->humiditySetpoint.get();
+	c.humidityUndershootLimit = shared_attributes->humidityUndershootLimit.get();
+	c.plateGateTempC = shared_attributes->plateGateTempC.get();
+	c.ventIntervalHours = shared_attributes->ventIntervalHours.get();
+	c.ventBurstSeconds = shared_attributes->ventBurstSeconds.get();
+	c.ventSettleMinutes = shared_attributes->ventSettleMinutes.get();
+	c.ventMaxDeferMinutes = shared_attributes->ventMaxDeferMinutes.get();
+	c.ventMinSecondsPerDay = shared_attributes->ventMinSecondsPerDay.get();
+	return c;
+}
+
+static bool publish_control_state(JsonBuilder* jb, const ControlSnapshot& c) {
+	jb->beginObject();
+	// Numeric, unlike the vent_state attribute, which is a word so a dashboard
+	// tile can show it. A chart cannot plot "settling".
+	jb->add("vent_state", c.ventState);
+	jb->add("vent_gate_blocked", c.gateBlocked);
+	jb->add("ctrl_loop_enabled", c.ctrlLoopEnabled);
+	jb->add("humidity_setpoint", c.humiditySetpoint, 1);
+	jb->add("humidity_undershoot_limit", c.humidityUndershootLimit, 1);
+	jb->add("plate_gate_temp_c", c.plateGateTempC, 1);
+	jb->add("vent_interval_hours", c.ventIntervalHours, 2);
+	jb->add("vent_first_hour_local", c.ventFirstHourLocal);
+	jb->add("vent_burst_seconds", c.ventBurstSeconds, 0);
+	jb->add("vent_settle_minutes", c.ventSettleMinutes, 2);
+	jb->add("vent_max_defer_minutes", c.ventMaxDeferMinutes, 0);
+	jb->add("vent_min_seconds_per_day", c.ventMinSecondsPerDay, 0);
+	jb->add("vent_min_duty_percent", c.ventMinDutyPercent);
+	jb->endObject();
+	return publish_json("v1/devices/me/telemetry", jb);
+}
+
+static void publish_control_state_task(void* arg) {
+	char buff[512];
+	JsonBuilder jb(buff, sizeof(buff));
+	while (true) {
+		waitForBit(MQTT_CONNECTED_BIT);
+
+		// Publish once on every connect, not only on change. A chart drawn from
+		// change events alone has nothing to anchor the line to until something
+		// moves, and after a reboot that could be hours.
+		ControlSnapshot last = read_control_snapshot();
+		if (!publish_control_state(&jb, last)) {
+			vTaskDelay(pdMS_TO_TICKS(5000));
+			continue;
+		}
+
+		while (true) {
+			vTaskDelay(pdMS_TO_TICKS(1000));
+			const ControlSnapshot now = read_control_snapshot();
+			if (memcmp(&now, &last, sizeof(now)) == 0) {
+				continue;
+			}
+			if (!publish_control_state(&jb, now)) {
+				break; // Reconnected somewhere else; start over from the top.
+			}
+			last = now;
+		}
+	}
+}
+
 static void publish_attributes_task(void* arg) {
 	char buff[1024];
 	JsonBuilder jb(buff, sizeof(buff));
@@ -433,6 +540,20 @@ extern "C" void app_main(void) {
 		ESP_LOGE(TAG, "Failed to create PublishAttributesTask");
 	} else {
 		ESP_LOGI(TAG, "PublishAttributesTask created successfully.");
+	}
+
+	result = xTaskCreate(
+		publish_control_state_task,   // Task function
+		"PublishControlStateTask",    // Task name (for debugging)
+		4096,                         // Stack size (in words)
+		nullptr,                      // Task input parameter
+		tskIDLE_PRIORITY + 1,         // Priority (above idle)
+		nullptr                       // Task handle
+	);
+	if (result != pdPASS) {
+		ESP_LOGE(TAG, "Failed to create PublishControlStateTask");
+	} else {
+		ESP_LOGI(TAG, "PublishControlStateTask created successfully.");
 	}
 
 	Ventilation::begin();

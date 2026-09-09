@@ -177,7 +177,27 @@ Arduino-flavoured I²C abstraction ([`main/I2C`](main/I2C)).
 **Telemetry** → `v1/devices/me/telemetry`
 
 `fan_duty_cycle`, `fan_rpm`, `temperature`, `humidity`, `plate_temperature`, plus batched
-`log` objects. `plate_temperature` is published as JSON `null` when a probe is configured
+`log` objects. These are the sensors, published every five seconds.
+
+Control state and the settings that shape it are published as telemetry too, but **only
+when they change**: `vent_state` (0 idle, 1 pending, 2 running, 3 settling),
+`vent_gate_blocked`, `ctrl_loop_enabled`, and every `vent_*` / `humidity_*` /
+`plate_gate_temp_c` setting. They are step functions — a setpoint holds for days, a
+ventilation state for minutes — so sampling them alongside the sensors would store the
+same number a million times to describe an event that happened twice. One snapshot is also
+published on every MQTT connect, so a chart has something to anchor to after a reboot
+instead of waiting hours for the first change.
+
+This duplicates values that are also attributes, deliberately. ThingsBoard keeps only the
+current value of an attribute, which answers "what is the setpoint" and cannot answer
+"what was the setpoint at 03:00 on Tuesday" — the question that matters when reading back
+a week of chamber behaviour. `vent_state` is numeric here and a word in the attribute, for
+the same split of purposes: charts cannot plot `settling`, and tiles should not show `3`.
+
+`vent_gate_blocked` is worth calling out: it is 1 while a burst is owed and the plate is
+too cold to take it. Nothing else records that. `fan_rpm` is zero whether ventilation is
+idle or being vetoed, so without this key the one thing the plate probe was fitted to
+measure — how much of the day the gate is holding air back — is invisible. `plate_temperature` is published as JSON `null` when a probe is configured
 but its reading is stale, so a gap in the chart is a gap and not a plausible-looking
 frozen value.
 
