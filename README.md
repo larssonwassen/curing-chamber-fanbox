@@ -184,6 +184,7 @@ is *not* persisted — see [Flash wear](#flash-wear):
 | Key | Default | Meaning |
 |---|---|---|
 | `ctrl_loop_enabled` | `true` | Automatic ventilation; when false, `fan_enabled` is obeyed directly |
+| `ota_on_dev_build` | `false` | Let an OTA package install over a hand-flashed build |
 | `fan_enabled` | `true` | Manual fan state, used when automatic ventilation is off |
 | `vent_now` | `false` | Rising edge ventilates immediately, ignoring the plate gate. Not persisted |
 | `vent_interval_hours` | `12.0` | How often a scheduled burst comes due |
@@ -219,20 +220,33 @@ committed.
 
 #### Flashing over USB while an OTA package is assigned
 
-A locally flashed build does not survive an assigned ThingsBoard package. `idf.py flash`
-writes `ota_0`, the bootloader may still be pointed at `ota_1`, and even after
-`idf.py erase-otadata` the device connects, sees a package whose version differs from the
-build it is running, and re-installs it about forty seconds later:
+A hand-flashed build declines OTA updates. Without that, bench-testing a change is a race
+the cable loses: `idf.py flash` writes `ota_0`, the bootloader may still be pointed at
+`ota_1`, and even after `idf.py erase-otadata` the device connects, sees an assigned
+package whose version differs from the build just flashed, and re-installs it about forty
+seconds later:
 
 ```
 ota: Updating curing-chamber-fanbox 0.5.0-dirty -> 0.5.0 (1133840 bytes into ota_1)
 ```
 
-That is the OTA logic working, and it is nearly invisible while it happens: the flash
-succeeds, the log looks right, and the firmware is quietly replaced before anything can be
-observed. Unassign the package in ThingsBoard before bench-flashing, or cut a release
-instead of flashing by hand. Neither is `version.txt`, which CI writes so the build container does not have
-to run git; a local build calls `git describe` itself.
+The flash succeeds, the log looks right, and the firmware under test is gone before
+anything can be observed.
+
+The version string is what distinguishes the two: a release is exactly `0.5.1`, and a
+build off a tag carries the rest of `git describe`, `0.5.1-2-gab12cd3-dirty`. Anything
+that is not digits and dots is treated as a development build, `0.0.0-dev` included.
+
+Set the `ota_on_dev_build` shared attribute to override it. That exists because declining
+is a safe default rather than a safe answer: a hand-flashed build sealed inside a chamber
+still has to be recoverable without opening it.
+
+Flashing over a slot the bootloader is not pointed at is a separate trap, and
+`erase-otadata` is the fix:
+
+```bash
+idf.py erase-otadata flash monitor
+```
 
 ### Credentials
 

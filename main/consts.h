@@ -74,6 +74,10 @@ class SharedAttributes : public ChangeTrackable {
 public:
 	AtomicVariable<bool> fanEnabled;
 	AtomicVariable<bool> ctrlLoopEnabled;
+	/// Allow an OTA update to install over a development build. Off by
+	/// default -- see OtaUpdater::onAttributes for why a bench build declines
+	/// updates it would otherwise accept.
+	AtomicVariable<bool> otaOnDevBuild;
 	AtomicVariable<esp_log_level_t> uartLogLevel;
 	AtomicVariable<esp_log_level_t> streamerLogLevel;
 	AtomicVariable<double> humiditySetpoint;
@@ -109,6 +113,7 @@ public:
 		ChangeTrackable(),
 		fanEnabled(true, "fe", onChange, this),
 		ctrlLoopEnabled(true, "cle", onChange, this),
+		otaOnDevBuild(false, "odb", onChange, this),
 		uartLogLevel(ESP_LOG_DEBUG, "ull", onChange, this),
 		streamerLogLevel(ESP_LOG_INFO, "sll", onChange, this),
 		humiditySetpoint(75.0, "hsp", onChange, this),

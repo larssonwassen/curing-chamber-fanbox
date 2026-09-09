@@ -179,7 +179,6 @@ void fan_task(void* arg) {
 
 	fan.setDutyCycle(0);
 
-	uint8_t shadowDuty = telemetry->fanDuty.get();
 	// -1 so the first pass always writes, whatever the knob reads.
 	int16_t shadowPercent = -1;
 	uint16_t shadowRPM = 0;
@@ -203,7 +202,6 @@ void fan_task(void* arg) {
 		}
 		if (shadowPercent != prcnt) {
 			shadowPercent = prcnt;
-			shadowDuty = currentDuty;
 			if (prcnt == 0) {
 				fan.setFanMinRPM(100);
 				fan.setDutyCycle(0);
