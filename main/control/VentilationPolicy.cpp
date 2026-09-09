@@ -142,14 +142,26 @@ bool VentilationPolicy::dryRequest(const VentilationInputs& in, const Ventilatio
 		}
 	}
 	const float raiseBelow = cfg.humiditySetpoint - cfg.humidityUndershoot;
-	if (in.humidity > raiseBelow) {
-		return false;
-	}
-	// And dry on the average too. Without this the trough of every compressor
+	// Raised on the average, not on the reading. The trough of every compressor
 	// cycle looks like a dry chamber: the plate gives its frost back to the air
 	// on the warm half of the cycle and takes it again on the cold half, which
 	// is worth tens of points of relative humidity in either direction and says
 	// nothing at all about how much water the chamber actually holds.
+	//
+	// Requiring the raw reading to agree, as this did at first, quietly undoes
+	// that. The two are only both below the line at the bottom of a cycle,
+	// which is exactly when the plate is coldest and the gate is shut. Measured
+	// on 2026-09-09 with the gate at 2 C: the raw reading was under the raise
+	// level 63% of the time and the plate was above the gate 56% of the time,
+	// but the two overlapped only 22% of the time, and one of that evening's
+	// four gate openings arrived to find the raw reading had already climbed
+	// back over the line. A trigger that may only speak while the plate is
+	// frozen is a trigger that rarely gets to act.
+	//
+	// Holding is a different question and still reads the raw value; see
+	// dryHolds(). "Is this chamber dry?" is about its state and needs the
+	// filter. "Has this burst delivered enough yet?" is about what the fan just
+	// did, which the filter is deliberately too slow to see.
 	if (cfg.humidityAverageMinutes > 0.0f) {
 		const uint32_t tauMs = (uint32_t)(cfg.humidityAverageMinutes * 60000.0f);
 		// Until the filter has seen a full time constant it is still mostly the
@@ -160,11 +172,11 @@ bool VentilationPolicy::dryRequest(const VentilationInputs& in, const Ventilatio
 		if (!humidityAvgValid_ || elapsed_ms(in.nowMs, humidityAvgSeedMs_) < tauMs) {
 			return false;
 		}
-		if (humidityAvg_ > raiseBelow) {
-			return false;
-		}
+		return humidityAvg_ <= raiseBelow;
 	}
-	return true;
+	// With the filter switched off there is nothing to average, so the reading
+	// itself is all there is to go on.
+	return in.humidity <= raiseBelow;
 }
 
 /// Whether a humidity burst that has already been asked for is still worth

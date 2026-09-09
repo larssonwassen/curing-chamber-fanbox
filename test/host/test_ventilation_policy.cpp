@@ -598,6 +598,26 @@ int main(void) {
 		check(late > 0, "...and asks for air once it has");
 	}
 
+	{
+		// The average raises on its own. Requiring the reading to agree as well
+		// would mean the trigger may only speak at the bottom of a compressor
+		// cycle, which is exactly when the plate is coldest and the gate shut:
+		// measured on the chamber, the two conditions overlapped 22% of the
+		// time. Here the chamber is dry on average and the reading has just
+		// swung high, as it does on the warm half of every cycle. That is the
+		// moment the fan should be free to run.
+		VentilationPolicy p;
+		VentilationInputs in = nominal(0);
+		in.humidity = 60.0f;
+		runFor(p, cfg, in, 29 * MIN); // warm the filter, still too early to fire
+
+		VentilationInputs high = in;
+		high.nowMs = 29 * MIN;
+		high.humidity = cfg.humiditySetpoint + 5.0f; // well above the raise level
+		uint32_t fan = runFor(p, cfg, high, 5 * MIN);
+		check(fan > 0, "a dry average raises a burst through a high reading");
+	}
+
 	printf("%s\n", failures == 0 ? "all ok" : "FAILURES");
 	return failures == 0 ? 0 : 1;
 }
