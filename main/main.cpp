@@ -271,7 +271,7 @@ static bool publish_telemetry(JsonBuilder* jb) {
 	// transitions, not time.
 	const VentState ventState = (VentState)attributes->ventState.get();
 	jb->add("vent_state", (int32_t)ventState);
-	jb->add("vent_gate_blocked", ventState == VentState::Pending ? 1 : 0);
+	jb->add("vent_gate_blocked", (int32_t)(ventState == VentState::Pending ? 1 : 0));
 	jb->endObject();
 	return publish_json("v1/devices/me/telemetry", jb);
 }
