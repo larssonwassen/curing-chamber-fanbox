@@ -260,6 +260,18 @@ static bool publish_telemetry(JsonBuilder* jb) {
 	} else if (PlateProbe::isConfigured()) {
 		jb->addNull("plate_temperature");
 	}
+	// Sampled here rather than published on change with the settings, because
+	// a chart cannot draw a state that is only reported when it moves. Between
+	// two change events there are no points, so the line is interpolated across
+	// the gap -- and a settling-to-idle ramp passes through the level that means
+	// pending on the way down, drawing a state the chamber was never in. It also
+	// makes the average honest: over a day, the mean of vent_gate_blocked is the
+	// fraction of the day ventilation spent vetoed, which is the question the
+	// plate probe was fitted to answer. Averaging change events instead counts
+	// transitions, not time.
+	const VentState ventState = (VentState)attributes->ventState.get();
+	jb->add("vent_state", (int32_t)ventState);
+	jb->add("vent_gate_blocked", ventState == VentState::Pending ? 1 : 0);
 	jb->endObject();
 	return publish_json("v1/devices/me/telemetry", jb);
 }
@@ -310,8 +322,6 @@ static bool publish_attributes(JsonBuilder* jb) {
 // NaN that somehow reached a setpoint compares equal to itself this way, where
 // == would report a change every second forever.
 struct ControlSnapshot {
-	int32_t ventState;
-	int32_t gateBlocked;
 	int32_t ctrlLoopEnabled;
 	int32_t ventFirstHourLocal;
 	int32_t ventMinDutyPercent;
@@ -328,13 +338,6 @@ struct ControlSnapshot {
 
 static ControlSnapshot read_control_snapshot(void) {
 	ControlSnapshot c = {};
-	const VentState state = (VentState)attributes->ventState.get();
-	c.ventState = (int32_t)state;
-	// Pending is exactly "a burst is owed and the plate is too cold to take
-	// it". Published separately because it is the question the plate probe was
-	// fitted to answer -- how much of the day ventilation is being vetoed --
-	// and it cannot be recovered from fan_rpm, which is zero either way.
-	c.gateBlocked = state == VentState::Pending ? 1 : 0;
 	c.ctrlLoopEnabled = shared_attributes->ctrlLoopEnabled.get() ? 1 : 0;
 	c.ventFirstHourLocal = shared_attributes->ventFirstHourLocal.get();
 	c.ventMinDutyPercent = shared_attributes->ventMinDutyPercent.get();
@@ -352,10 +355,6 @@ static ControlSnapshot read_control_snapshot(void) {
 
 static bool publish_control_state(JsonBuilder* jb, const ControlSnapshot& c) {
 	jb->beginObject();
-	// Numeric, unlike the vent_state attribute, which is a word so a dashboard
-	// tile can show it. A chart cannot plot "settling".
-	jb->add("vent_state", c.ventState);
-	jb->add("vent_gate_blocked", c.gateBlocked);
 	jb->add("ctrl_loop_enabled", c.ctrlLoopEnabled);
 	jb->add("humidity_setpoint", c.humiditySetpoint, 1);
 	jb->add("humidity_undershoot_limit", c.humidityUndershootLimit, 1);

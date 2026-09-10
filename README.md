@@ -232,14 +232,21 @@ Arduino-flavoured I²C abstraction ([`main/I2C`](main/I2C)).
 
 **Telemetry** → `v1/devices/me/telemetry`
 
-`fan_duty_cycle`, `fan_rpm`, `temperature`, `humidity`, `plate_temperature`, plus batched
-`log` objects. These are the sensors, published every five seconds.
+`fan_duty_cycle`, `fan_rpm`, `temperature`, `humidity`, `plate_temperature`,
+`vent_state` (0 idle, 1 pending, 2 running, 3 settling) and `vent_gate_blocked`, plus
+batched `log` objects. These are published every five seconds.
 
-Control state and the settings that shape it are published as telemetry too, but **only
-when they change**: `vent_state` (0 idle, 1 pending, 2 running, 3 settling),
-`vent_gate_blocked`, `ctrl_loop_enabled`, and every `vent_*` / `humidity_*` /
-`plate_gate_temp_c` setting. They are step functions — a setpoint holds for days, a
-ventilation state for minutes — so sampling them alongside the sensors would store the
+`vent_state` is sampled rather than reported on change, which it used to be, because a
+chart cannot draw a state that only appears when it moves. Between two change events there
+are no points at all, so the line is drawn straight across the gap — and a settling-to-idle
+ramp passes through the level that means pending on the way down, showing a state the
+chamber was never in. Sampling also makes the average honest: over a day the mean of
+`vent_gate_blocked` is the fraction of the day ventilation spent vetoed, whereas the mean
+of a change event counts transitions rather than time.
+
+The settings that shape the control loop are published as telemetry too, but **only when
+they change**: `ctrl_loop_enabled` and every `vent_*` / `humidity_*` / `plate_gate_temp_c`
+setting. A setpoint holds for days, so sampling one alongside the sensors would store the
 same number a million times to describe an event that happened twice. One snapshot is also
 published on every MQTT connect, so a chart has something to anchor to after a reboot
 instead of waiting hours for the first change.
