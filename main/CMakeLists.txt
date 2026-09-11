@@ -18,6 +18,8 @@ idf_component_register(
         "plate/PlateProbe.cpp"
         "control/VentilationPolicy.cpp"
         "control/Ventilation.cpp"
+        "humidifier/HumidifierPolicy.cpp"
+        "humidifier/Humidifier.cpp"
         "net/TimeSync.cpp"
         "log_streamer.cpp"
         "util.cpp"

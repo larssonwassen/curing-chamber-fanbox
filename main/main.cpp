@@ -35,6 +35,7 @@
 #include "pot/Potentiometer.h"
 #include "plate/PlateProbe.h"
 #include "control/Ventilation.h"
+#include "humidifier/Humidifier.h"
 #include "net/TimeSync.h"
 
 
@@ -272,6 +273,17 @@ static bool publish_telemetry(JsonBuilder* jb) {
 	const VentState ventState = (VentState)attributes->ventState.get();
 	jb->add("vent_state", (int32_t)ventState);
 	jb->add("vent_gate_blocked", (int32_t)(ventState == VentState::Pending ? 1 : 0));
+	// Sampled for the same reasons as vent_state above, plus one of its own:
+	// avg(humidifier_duty_percent) over a day answers whether the box is being
+	// asked for more than the duty cap allows, which is the number that decides
+	// whether the target is achievable at all.
+	const HumidifierState humidifierState =
+		(HumidifierState)attributes->humidifierState.get();
+	jb->add("humidifier_state", (int32_t)humidifierState);
+	jb->add("humidifier_gate_blocked",
+			(int32_t)(humidifierState == HumidifierState::Pending ? 1 : 0));
+	jb->add("humidifier_rpm", telemetry->humidifierRPM.get());
+	jb->add("humidifier_duty_percent", (double)(telemetry->humidifierDutyPercent.get()), 1);
 	jb->endObject();
 	return publish_json("v1/devices/me/telemetry", jb);
 }
@@ -298,6 +310,10 @@ static bool publish_attributes(JsonBuilder* jb) {
 	jb->add("vent_next_seconds", (int32_t)attributes->ventNextSeconds.get());
 	jb->add("plate_probe", PlateProbe::description());
 	jb->add("fan_stalled", attributes->fanStalled.get());
+	jb->add("humidifier_state",
+			Humidifier::stateName((HumidifierState)attributes->humidifierState.get()));
+	jb->add("humidifier_running", attributes->humidifierRunning.get());
+	jb->add("humidifier_stalled", attributes->humidifierStalled.get());
 	jb->add("ram_free", get_ram_free());
 	jb->add("ram_total", get_ram_total());
 	jb->endObject();
@@ -323,8 +339,14 @@ static bool publish_attributes(JsonBuilder* jb) {
 // == would report a change every second forever.
 struct ControlSnapshot {
 	int32_t ctrlLoopEnabled;
+	int32_t humidifierEnabled;
 	int32_t ventFirstHourLocal;
 	int32_t ventMinDutyPercent;
+	double  humidifierTargetRh;
+	double  humidifierRaiseBandRh;
+	double  humidifierBurstSeconds;
+	double  humidifierSettleMinutes;
+	double  humidifierMaxDutyPercent;
 	double  humiditySetpoint;
 	double  humidityUndershootLimit;
 	double  humidityAverageMinutes;
@@ -339,6 +361,12 @@ struct ControlSnapshot {
 static ControlSnapshot read_control_snapshot(void) {
 	ControlSnapshot c = {};
 	c.ctrlLoopEnabled = shared_attributes->ctrlLoopEnabled.get() ? 1 : 0;
+	c.humidifierEnabled = shared_attributes->humidifierEnabled.get() ? 1 : 0;
+	c.humidifierTargetRh = shared_attributes->humidifierTargetRh.get();
+	c.humidifierRaiseBandRh = shared_attributes->humidifierRaiseBandRh.get();
+	c.humidifierBurstSeconds = shared_attributes->humidifierBurstSeconds.get();
+	c.humidifierSettleMinutes = shared_attributes->humidifierSettleMinutes.get();
+	c.humidifierMaxDutyPercent = shared_attributes->humidifierMaxDutyPercent.get();
 	c.ventFirstHourLocal = shared_attributes->ventFirstHourLocal.get();
 	c.ventMinDutyPercent = shared_attributes->ventMinDutyPercent.get();
 	c.humiditySetpoint = shared_attributes->humiditySetpoint.get();
@@ -367,6 +395,12 @@ static bool publish_control_state(JsonBuilder* jb, const ControlSnapshot& c) {
 	jb->add("vent_max_defer_minutes", c.ventMaxDeferMinutes, 0);
 	jb->add("vent_min_seconds_per_day", c.ventMinSecondsPerDay, 0);
 	jb->add("vent_min_duty_percent", c.ventMinDutyPercent);
+	jb->add("humidifier_enabled", c.humidifierEnabled);
+	jb->add("humidifier_target_rh", c.humidifierTargetRh, 1);
+	jb->add("humidifier_raise_band_rh", c.humidifierRaiseBandRh, 1);
+	jb->add("humidifier_burst_seconds", c.humidifierBurstSeconds, 0);
+	jb->add("humidifier_settle_minutes", c.humidifierSettleMinutes, 1);
+	jb->add("humidifier_max_duty_percent", c.humidifierMaxDutyPercent, 0);
 	jb->endObject();
 	return publish_json("v1/devices/me/telemetry", jb);
 }
@@ -463,11 +497,14 @@ extern "C" void app_main(void) {
 	esp_log_level_set("*", shared_attributes->uartLogLevel.get());
 	
 
-	// Set pin D2 high
+	// D2 switches the exchange fan, D4 the humidifier. Both drive a small
+	// N-FET that inverts into a high-side P-MOSFET whose gate is pulled up to
+	// +12, so a low or floating line leaves the load off -- which is what the
+	// pins are anyway between reset and this call.
 	gpio_config_t io_conf = {};
 	io_conf.intr_type = GPIO_INTR_DISABLE;
 	io_conf.mode = GPIO_MODE_OUTPUT;
-	io_conf.pin_bit_mask = (1ULL << D2);
+	io_conf.pin_bit_mask = (1ULL << D2) | (1ULL << D4);
 	io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
 	io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
 	ESP_ERROR_CHECK(gpio_config(&io_conf));
@@ -475,6 +512,11 @@ extern "C" void app_main(void) {
 	bool fanEnabled = shared_attributes->fanEnabled.get();
 	ESP_ERROR_CHECK(gpio_set_level(D2, fanEnabled ? 1 : 0));
 	attributes->fanEnabled.set(fanEnabled);
+	// The humidifier starts off regardless of what NVS remembers, and stays off
+	// until HumidifierTask decides otherwise about a second later. The
+	// exchange fan restores its stored level because a chamber wants air; a
+	// tray of water wants a reason.
+	ESP_ERROR_CHECK(gpio_set_level(D4, 0));
 	// The I2C bus is not up yet and fan_task has not run, so the EMC2101 cannot
 	// be queried here -- the old fan.getFanRPM() call only ever returned 0 after
 	// logging a warning. Report not-running until fan_task publishes a reading.
@@ -567,6 +609,9 @@ extern "C" void app_main(void) {
 	}
 
 	Ventilation::begin();
+	// After Ventilation, because the humidifier reads the humidity average
+	// VentilationPolicy maintains rather than filtering the same signal twice.
+	Humidifier::begin();
 
 	ram_log_snapshot("setup complete");
 }

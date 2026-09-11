@@ -106,6 +106,9 @@ void request_attributes(void) {
 		"vent_now,vent_interval_hours,vent_first_hour_local,vent_burst_seconds,"
 		"vent_settle_minutes,vent_max_defer_minutes,"
 		"vent_min_seconds_per_day,vent_min_duty_percent,plate_gate_temp_c,"
+		"humidifier_enabled,humidifier_target_rh,humidifier_raise_band_rh,"
+		"humidifier_burst_seconds,humidifier_settle_minutes,"
+		"humidifier_max_duty_percent,humidify_now,"
 		"fw_title,fw_version,fw_size,fw_checksum,fw_checksum_algorithm";
 
 	char payload[sizeof(SHARED_KEYS) + 64];
@@ -189,6 +192,8 @@ static void handle_mqtt_message(const char* topic, char* data, size_t len) {
 	handle_bool_attribute(jp, dataRoot, "ctrl_loop_enabled", shared_attributes->ctrlLoopEnabled);
 	handle_bool_attribute(jp, dataRoot, "vent_now", shared_attributes->ventNow);
 	handle_bool_attribute(jp, dataRoot, "ota_on_dev_build", shared_attributes->otaOnDevBuild);
+	handle_bool_attribute(jp, dataRoot, "humidifier_enabled", shared_attributes->humidifierEnabled);
+	handle_bool_attribute(jp, dataRoot, "humidify_now", shared_attributes->humidifyNow);
 
 	// Handle floating point attributes
 	handle_number_attribute(jp, dataRoot, "humidity_setpoint", shared_attributes->humiditySetpoint);
@@ -200,6 +205,11 @@ static void handle_mqtt_message(const char* topic, char* data, size_t len) {
 	handle_number_attribute(jp, dataRoot, "vent_max_defer_minutes", shared_attributes->ventMaxDeferMinutes);
 	handle_number_attribute(jp, dataRoot, "plate_gate_temp_c", shared_attributes->plateGateTempC);
 	handle_number_attribute(jp, dataRoot, "vent_min_seconds_per_day", shared_attributes->ventMinSecondsPerDay);
+	handle_number_attribute(jp, dataRoot, "humidifier_target_rh", shared_attributes->humidifierTargetRh);
+	handle_number_attribute(jp, dataRoot, "humidifier_raise_band_rh", shared_attributes->humidifierRaiseBandRh);
+	handle_number_attribute(jp, dataRoot, "humidifier_burst_seconds", shared_attributes->humidifierBurstSeconds);
+	handle_number_attribute(jp, dataRoot, "humidifier_settle_minutes", shared_attributes->humidifierSettleMinutes);
+	handle_number_attribute(jp, dataRoot, "humidifier_max_duty_percent", shared_attributes->humidifierMaxDutyPercent);
 
 	esp_log_level_set("*", shared_attributes->uartLogLevel.get());
 
