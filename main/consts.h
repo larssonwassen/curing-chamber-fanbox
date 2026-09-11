@@ -54,10 +54,11 @@ public:
 	/// Evaporator plate temperature. Left at its initial value, and published
 	/// as null, when no probe is fitted -- see PlateProbe.
 	AtomicVariable<double> plateTemperature;
-	/// The filtered humidity the dry trigger actually reads. Published beside
-	/// the raw value because the difference between them is the whole point:
-	/// the raw trace crosses the trigger level every compressor cycle and this
-	/// one does not. Negative when the filter has no reading yet.
+	/// The filtered humidity the humidifier's raise trigger actually reads.
+	/// Maintained by ClimateSensor; see climate/HumidityAverage.h. Published
+	/// beside the raw value because the difference between them is the whole
+	/// point: the raw trace crosses the raise level every compressor cycle and
+	/// this one does not. Negative when the filter has no reading yet.
 	AtomicVariable<double> humidityAverage;
 	/// Humidifier fan speed, counted on its own tach line by PCNT. Zero while
 	/// the fan is commanded off, which is most of the time.

@@ -245,9 +245,9 @@ static bool publish_telemetry(JsonBuilder* jb) {
 	// controlled variable to whole percent -- in exactly the graph you would
 	// use to see whether the control loop is behaving.
 	jb->add("humidity", (double)(telemetry->humidity.get()), 1);
-	// What the dry trigger reads. Null until the filter has a reading, and
-	// whenever the average is switched off, so the chart shows a gap rather
-	// than a line pinned to a sentinel.
+	// What the humidifier's raise trigger reads. Null until the filter has a
+	// reading, so the chart shows a gap rather than a line pinned to a
+	// sentinel.
 	if (telemetry->humidityAverage.get() >= 0.0) {
 		jb->add("humidity_avg", (double)(telemetry->humidityAverage.get()), 1);
 	} else {
