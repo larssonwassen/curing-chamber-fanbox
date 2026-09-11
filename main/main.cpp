@@ -347,8 +347,6 @@ struct ControlSnapshot {
 	double  humidifierBurstSeconds;
 	double  humidifierSettleMinutes;
 	double  humidifierMaxDutyPercent;
-	double  humiditySetpoint;
-	double  humidityUndershootLimit;
 	double  humidityAverageMinutes;
 	double  plateGateTempC;
 	double  ventIntervalHours;
@@ -369,8 +367,6 @@ static ControlSnapshot read_control_snapshot(void) {
 	c.humidifierMaxDutyPercent = shared_attributes->humidifierMaxDutyPercent.get();
 	c.ventFirstHourLocal = shared_attributes->ventFirstHourLocal.get();
 	c.ventMinDutyPercent = shared_attributes->ventMinDutyPercent.get();
-	c.humiditySetpoint = shared_attributes->humiditySetpoint.get();
-	c.humidityUndershootLimit = shared_attributes->humidityUndershootLimit.get();
 	c.humidityAverageMinutes = shared_attributes->humidityAverageMinutes.get();
 	c.plateGateTempC = shared_attributes->plateGateTempC.get();
 	c.ventIntervalHours = shared_attributes->ventIntervalHours.get();
@@ -384,8 +380,6 @@ static ControlSnapshot read_control_snapshot(void) {
 static bool publish_control_state(JsonBuilder* jb, const ControlSnapshot& c) {
 	jb->beginObject();
 	jb->add("ctrl_loop_enabled", c.ctrlLoopEnabled);
-	jb->add("humidity_setpoint", c.humiditySetpoint, 1);
-	jb->add("humidity_undershoot_limit", c.humidityUndershootLimit, 1);
 	jb->add("humidity_average_minutes", c.humidityAverageMinutes, 1);
 	jb->add("plate_gate_temp_c", c.plateGateTempC, 1);
 	jb->add("vent_interval_hours", c.ventIntervalHours, 2);
@@ -612,8 +606,6 @@ extern "C" void app_main(void) {
 	}
 
 	Ventilation::begin();
-	// After Ventilation, because the humidifier reads the humidity average
-	// VentilationPolicy maintains rather than filtering the same signal twice.
 	Humidifier::begin();
 
 	ram_log_snapshot("setup complete");

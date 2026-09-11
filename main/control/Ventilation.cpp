@@ -7,7 +7,6 @@
 
 #include "pins.h"
 #include "consts.h"
-#include "climate/ClimateSensor.h"
 #include "plate/PlateProbe.h"
 #include "net/TimeSync.h"
 
@@ -36,9 +35,6 @@ VentilationSettings read_settings(void) {
 	cfg.plateGateC = (float)shared_attributes->plateGateTempC.get();
 	cfg.maxDeferMinutes = (float)shared_attributes->ventMaxDeferMinutes.get();
 	cfg.minSecondsPerDay = (float)shared_attributes->ventMinSecondsPerDay.get();
-	cfg.humiditySetpoint = (float)shared_attributes->humiditySetpoint.get();
-	cfg.humidityUndershoot = (float)shared_attributes->humidityUndershootLimit.get();
-	cfg.humidityAverageMinutes = (float)shared_attributes->humidityAverageMinutes.get();
 	return cfg;
 }
 
@@ -72,8 +68,6 @@ void ventilation_task(void* arg) {
 			in.nowMs = (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount());
 			in.haveClock = TimeSync::isSynced();
 			in.localEpoch = TimeSync::localEpoch();
-			in.humidityValid = ClimateSensor::isFresh();
-			in.humidity = ClimateSensor::humidity();
 			in.plateConfigured = PlateProbe::isConfigured();
 			in.plateValid = PlateProbe::isFresh();
 			in.plateC = PlateProbe::temperature();
@@ -90,20 +84,15 @@ void ventilation_task(void* arg) {
 			fanOn = d.fanOn;
 
 			if (d.reason != lastReason || d.state != lastState) {
-				ESP_LOGI(TAG, "%s (%s) humidity=%.1f%% plate=%s",
+				ESP_LOGI(TAG, "%s (%s) plate=%s",
 						 d.reason,
 						 Ventilation::stateName(d.state),
-						 in.humidityValid ? (double)in.humidity : 0.0,
 						 in.plateConfigured
 							 ? (in.plateValid ? "reading" : "stale")
 							 : "absent");
 				lastReason = d.reason;
 				lastState = d.state;
 			}
-
-			// Negative stands for "no reading yet", and is published as null.
-			telemetry->humidityAverage.set(
-				s_policy.humidityAverageValid() ? (double)s_policy.humidityAverage() : -1.0);
 
 			attributes->ventState.set((int32_t)d.state);
 			const uint32_t nextMs = s_policy.msUntilScheduled(in, cfg);

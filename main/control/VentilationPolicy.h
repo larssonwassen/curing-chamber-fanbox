@@ -8,58 +8,43 @@
 // with the interesting failure modes, and none of them need hardware to
 // reproduce. See test/host/test_ventilation_policy.cpp.
 //
-// The model this encodes:
+// This is a timer, not a controller. Its job is fresh air: a chamber with meat
+// hanging in it needs the air changed on a timetable whether or not anything
+// else is happening, and how much air it needs is a function of the clock, not
+// of any measurement this firmware takes.
 //
-//   * The fan is a one-way actuator with weak authority. It pulls room air into
-//     the chamber, which at a 10 C setpoint carries roughly the same absolute
-//     moisture as the chamber air -- sometimes a little more, in a dry house a
-//     little less. So the fan can nudge humidity up, and cannot usefully bring
-//     it down.
-//   * The real dehumidifier is the evaporator plate, which is far stronger than
-//     the fan and not under this firmware's control at all.
-//   * The meat is the real humidifier: a drying subprimal gives up on the order
-//     of tens of grams of water a day, against roughly one gram per air change.
+// It used to be more than that. The fan doubled as the only way to raise
+// humidity, so an extra burst could be asked for whenever the chamber read dry,
+// and most of the complication here existed to keep that trigger from doing
+// harm. The measured authority was never much: doubling the fan's daily run
+// time moved the chamber by 0.66 RH points. There is a humidifier fitted now,
+// with real authority over humidity and a duty cap of its own, so the exchange
+// fan gives the job up entirely. Humidity no longer appears in this policy's
+// inputs, its settings, or its triggers.
 //
-// Which is why this is not a setpoint controller. Ventilation happens on a
-// schedule, because its actual job is fresh air; humidity may ask for extra
-// bursts when the chamber is dry, bounded by burst-and-settle; and nothing here
-// ever tries to dry the chamber out, because the fan cannot.
+// What survives from that era, because it was never really about humidity:
+//
+//   * The plate gate. Moist room air meeting sub-zero evaporator metal is what
+//     armoured the backplate in ice, and a scheduled burst carries exactly that
+//     air. So a burst waits while the plate is cold -- but only up to
+//     `maxDeferMinutes`, because stale air is a real problem and a burst owed
+//     since this morning has to happen eventually. The humidifier deliberately
+//     has no such timeout; it can afford to wait, and this cannot.
+//   * A burst is never a commitment. The plate is re-read on every tick, since
+//     the thing the gate prevents is just as bad thirty seconds in as it was at
+//     the start. A burst that overrode the gate to start is not then cut off by
+//     it, which would be the same as never running it.
+//   * A minimum on-time under the burst length, so a plate sitting on its
+//     threshold cannot cycle the relay at the loop rate.
 //
 // The state below records *history* -- when the last burst ran, which schedule
-// slot has been served, how much fan time the day has had. It deliberately does
-// not record *intent*: a burst that is owed, or one already running, re-reads
-// the plate and the humidity on every tick and stops as soon as its reasons
-// stop holding. An earlier version latched the decision at the moment a burst
-// was raised, which produced two failures that looked unrelated and were not.
-// A humidity burst asked for at 63% RH sat waiting on a cold plate for seven
-// minutes and then fired into a chamber that had climbed to 73%; and a burst
-// that started the instant the plate touched the gate kept running for another
-// eighty-five seconds while the plate dived to -2.6 C, which is precisely the
-// moist-air-onto-cold-metal event the gate exists to prevent.
+// slot has been served, how much fan time the day has had.
 //
-// A further consequence of the plate being the real dehumidifier: over a
-// compressor cycle, an instantaneous humidity reading mostly reports where the
-// compressor is, not how wet the chamber is. Measured on 2026-09-09 over a
-// clean 47-minute cycle with the fan idle, the chamber's water content swung
-// 3.38 to 6.60 g/kg -- 49% of its own peak -- as frost went onto the plate and
-// came back off it. At the cycle's mean temperature that is 49 points of
-// relative humidity, netted down to the 27 points actually observed only
-// because air temperature swings in phase and pulls the other way. A trigger
-// reading that raw signal fires at the trough of every cycle. So a dry burst is
-// raised only when the chamber is dry *both* right now and on a filtered
-// average spanning a cycle; it is still held, and cut short, on the raw reading,
-// because a burst's own effect is a step the filter is meant to lag.
-//
-// Re-reading a condition every tick invites the opposite failure, where a
-// condition sitting on its threshold cycles the fan at the loop rate. Three
-// things stop that: humidity bursts are raised at `setpoint - undershoot` but
-// held until `setpoint`, the plate must fall a little below the gate before it
-// cuts a burst, and no burst may be stopped before a minimum on-time.
-//
-// The predecessor was a bang-bang loop that held the fan on until humidity
-// reached a setpoint. That could run for hours, and the moisture it carried in
-// froze onto the plate faster than the plate could shed it between compressor
-// cycles -- which is how the backplate ended up armoured in ice.
+// The predecessor to all of this was a bang-bang loop that held the fan on
+// until humidity reached a setpoint. That could run for hours, and the moisture
+// it carried in froze onto the plate faster than the plate could shed it
+// between compressor cycles -- which is how the backplate ended up armoured in
+// ice in the first place.
 
 enum class VentState {
 	Idle,      ///< Nothing due.
@@ -71,7 +56,6 @@ enum class VentState {
 enum class VentTrigger {
 	None,
 	Scheduled,  ///< The timer came round. This is the one that matters.
-	Dry,        ///< Humidity below the setpoint band asked for an extra burst.
 	Makeup,     ///< The day's minimum ventilation time was falling behind.
 	Manual,     ///< Somebody asked for a burst from ThingsBoard.
 };
@@ -80,7 +64,7 @@ struct VentilationSettings {
 	float intervalHours = 12.0f;     ///< Spacing of scheduled bursts.
 	int   firstHourLocal = 6;        ///< Local hour anchoring the schedule.
 	float burstSeconds = 90.0f;      ///< How long the fan runs per burst.
-	float settleMinutes = 1.5f;      ///< Quiet time before humidity may ask again.
+	float settleMinutes = 1.5f;      ///< Quiet time after a burst before another may start.
 	float plateGateC = 2.0f;         ///< Hold bursts while the plate is colder.
 	float maxDeferMinutes = 360.0f;  ///< Give up gating and ventilate anyway.
 	/// Floor on total fan time per day. Every burst counts towards it,
@@ -89,18 +73,9 @@ struct VentilationSettings {
 	///
 	/// At the default this is exactly what the schedule already delivers
 	/// (2 x 90 s), so it changes nothing until raised. Raise it when the
-	/// chamber needs more air than humidity happens to ask for.
+	/// chamber needs more air than the interval delivers -- with humidity out
+	/// of the picture, this and `intervalHours` are the whole dosage.
 	float minSecondsPerDay = 180.0f;
-	float humiditySetpoint = 75.0f;
-	float humidityUndershoot = 5.0f;
-	/// Time constant of the humidity average the dry trigger is raised on.
-	/// Wants to be comfortably longer than one compressor cycle: at two thirds
-	/// of the cycle a first-order filter still passes a third of the swing,
-	/// and at two cycles under a fifth. 30 minutes against the measured
-	/// 31-47 minute cycle turns a +/-13.5 point swing into +/-2.5, which
-	/// leaves the trigger most of its 7.5 points of margin. Zero disables the
-	/// average and restores the instantaneous behaviour.
-	float humidityAverageMinutes = 30.0f;
 };
 
 struct VentilationInputs {
@@ -108,9 +83,6 @@ struct VentilationInputs {
 
 	bool    haveClock = false;   ///< True once SNTP has set the system time.
 	int64_t localEpoch = 0;      ///< Unix time shifted into local time.
-
-	bool  humidityValid = false;
-	float humidity = 0.0f;
 
 	/// A person asked for a burst now, edge-detected by the caller. Bypasses
 	/// the settle timer and the plate gate: an explicit request should do what
@@ -140,11 +112,6 @@ public:
 	VentilationDecision update(const VentilationInputs& in, const VentilationSettings& cfg);
 
 	VentState state() const { return state_; }
-	/// The filtered humidity the dry trigger is raised on. Equal to the raw
-	/// reading until the first average has been seeded, and meaningless before
-	/// any valid reading has arrived -- check humidityAverageValid() first.
-	float humidityAverage() const { return humidityAvg_; }
-	bool humidityAverageValid() const { return humidityAvgValid_; }
 	/// Milliseconds until the next scheduled burst, or 0 when one is due or
 	/// running. Only meaningful without a clock; with one, the schedule is
 	/// absolute and this is an estimate.
@@ -157,29 +124,17 @@ public:
 
 private:
 	bool scheduledDue(const VentilationInputs& in, const VentilationSettings& cfg);
-	bool dryRequest(const VentilationInputs& in, const VentilationSettings& cfg) const;
 	bool makeupRequest(const VentilationInputs& in, const VentilationSettings& cfg) const;
 	void rollDayWindow(const VentilationInputs& in);
 	bool plateAllows(const VentilationInputs& in, const VentilationSettings& cfg) const;
 
-	// The "should this still be happening?" half. plateAllows()/dryRequest()
-	// decide whether to *start*; these decide whether to *continue*, and are
-	// re-read on every tick of a pending or running burst.
-	bool dryHolds(const VentilationInputs& in, const VentilationSettings& cfg) const;
-	void updateHumidityAverage(const VentilationInputs& in, const VentilationSettings& cfg);
-	bool triggerHolds(const VentilationInputs& in, const VentilationSettings& cfg) const;
+	// The "should this still be happening?" half. plateAllows() decides whether
+	// to *start*; this decides whether to *continue*, and is re-read on every
+	// tick of a running burst.
 	bool plateHolds(const VentilationInputs& in, const VentilationSettings& cfg) const;
 
 	VentState   state_ = VentState::Idle;
 	VentTrigger trigger_ = VentTrigger::None;
-
-	// A first-order filter on humidity, long enough to span a compressor
-	// cycle. See the note above about what an instantaneous reading actually
-	// measures in this chamber.
-	float    humidityAvg_ = 0.0f;
-	bool     humidityAvgValid_ = false;
-	uint32_t humidityAvgMs_ = 0;
-	uint32_t humidityAvgSeedMs_ = 0;
 
 	uint32_t burstStartedMs_ = 0;
 	uint32_t burstEndedMs_ = 0;
@@ -199,7 +154,7 @@ private:
 
 	// The day window. With a clock this is the local calendar day, so the
 	// counters reset at local midnight; without one it is a rolling 24 hours
-	// from boot. Both the dry-burst cap and the daily minimum hang off it.
+	// from boot. The daily minimum hangs off it.
 	uint32_t dayRunMs_ = 0;
 	uint32_t dayWindowStartMs_ = 0;
 	bool     dayWindowSet_ = false;

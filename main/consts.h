@@ -95,22 +95,18 @@ public:
 	AtomicVariable<bool> otaOnDevBuild;
 	AtomicVariable<esp_log_level_t> uartLogLevel;
 	AtomicVariable<esp_log_level_t> streamerLogLevel;
-	AtomicVariable<double> humiditySetpoint;
-	/// How far below the setpoint the chamber must fall before humidity is
-	/// allowed to ask for an extra ventilation burst. There is no matching
-	/// overshoot limit any more: the fan cannot dry the chamber, so there is
-	/// nothing for it to do when humidity is high.
-	AtomicVariable<double> humidityUndershootLimit;
-	/// Time constant, in minutes, of the average the dry trigger reads instead
-	/// of the raw sensor. The chamber's own compressor swings humidity by tens
-	/// of points every half hour as frost goes onto the plate and comes back
-	/// off it; none of that swing means the chamber has gained or lost water.
-	/// Zero reads the sensor directly. See control/VentilationPolicy.h.
+	/// Time constant, in minutes, of the humidity average, which is what the
+	/// humidifier's raise trigger reads instead of the raw sensor. The
+	/// chamber's own compressor swings humidity by tens of points every half
+	/// hour as frost goes onto the plate and comes back off it; none of that
+	/// swing means the chamber has gained or lost water. Zero reads the sensor
+	/// directly. See climate/HumidityAverage.h.
 	AtomicVariable<double> humidityAverageMinutes;
 
 	// Ventilation schedule. See control/VentilationPolicy.h for what these
 	// mean together; the short version is that ventilation is a timer, not a
-	// setpoint controller, because fresh air rather than humidity is its job.
+	// controller. Humidity is not among them: the humidifier owns that now,
+	// and the exchange fan runs on the clock and the plate gate alone.
 	AtomicVariable<double> ventIntervalHours;
 	AtomicVariable<int32_t> ventFirstHourLocal;
 	AtomicVariable<double> ventBurstSeconds;
@@ -137,10 +133,10 @@ public:
 	/// false. Off by default so a chamber with no box built yet behaves exactly
 	/// as it did before this firmware shipped.
 	AtomicVariable<bool> humidifierEnabled;
-	/// The humidity the chamber is actually supposed to sit at. Deliberately
-	/// not humiditySetpoint: that one decides when the chamber is dry enough to
-	/// be worth spending fresh air on, which is a different question asked of a
-	/// far weaker actuator.
+	/// The humidity the chamber is supposed to sit at. The only humidity
+	/// setpoint in the firmware now: ventilation used to have one of its own,
+	/// which asked a far weaker actuator a different question and has gone
+	/// along with the coupling.
 	AtomicVariable<double> humidifierTargetRh;
 	/// How far below the target the average must fall before a burst starts.
 	/// The burst then runs until the raw reading reaches the target, so this is
@@ -167,8 +163,6 @@ public:
 		otaOnDevBuild(false, "odb", onChange, this),
 		uartLogLevel(ESP_LOG_DEBUG, "ull", onChange, this),
 		streamerLogLevel(ESP_LOG_INFO, "sll", onChange, this),
-		humiditySetpoint(75.0, "hsp", onChange, this),
-		humidityUndershootLimit(5.0, "hus", onChange, this),
 		// Comfortably longer than the measured 31-47 minute compressor cycle.
 		humidityAverageMinutes(30.0, "ham", onChange, this),
 		// Twice a day, anchored at 06:00 and 18:00 local.

@@ -24,8 +24,9 @@
 //     over a tray at high duty holds the chamber near saturation, and the
 //     things that grow at 90% RH on a curing surface are not the ones wanted.
 //
-// Three behaviours are inherited wholesale from the ventilation policy, for
-// exactly the reasons documented there:
+// Three behaviours come from the ventilation policy as it was before the
+// humidifier existed -- the exchange fan used to be the only way to raise
+// humidity, and these are what it learned doing that job:
 //
 //   * A burst is *raised* on a filtered average and *held* on the raw reading.
 //     The compressor swings raw humidity by tens of points every half hour as
@@ -33,8 +34,9 @@
 //     that raw signal fires at the trough of every cycle. The burst's own
 //     effect, though, is a step the filter is meant to lag -- so the thing that
 //     decides when to stop has to be the instantaneous value. The average is
-//     not recomputed here: the caller passes in the one VentilationPolicy
-//     already maintains, so both loops act on the same number.
+//     not recomputed here: the caller passes in the one the climate sensor
+//     maintains. See climate/HumidityAverage.h, which is where this filter
+//     moved when the exchange fan stopped reacting to humidity at all.
 //   * Conditions are re-read every tick rather than latched at the moment a
 //     burst is raised. A request that waited out a cold plate for seven minutes
 //     is a request made about a chamber that no longer exists.
@@ -64,11 +66,11 @@ enum class HumidifierTrigger {
 };
 
 struct HumidifierSettings {
-	/// Humidity the humidifier is trying to reach. Separate from the
-	/// ventilation policy's humiditySetpoint on purpose: that one decides when
-	/// the chamber is dry enough to be worth spending *fresh air* on, and it is
-	/// a weak actuator asking a cheap question. This one is the number the
-	/// chamber is actually supposed to sit at.
+	/// Humidity the humidifier is trying to reach, and the only humidity
+	/// setpoint left in the firmware. Ventilation had one of its own until the
+	/// humidifier was fitted; it asked a weak actuator a cheap question, and it
+	/// went when the coupling did. This one is the number the chamber is
+	/// actually supposed to sit at.
 	float targetRh = 78.0f;
 	/// How far below the target the average must fall before a burst is raised.
 	/// The burst then runs until the raw reading reaches the target, so this is

@@ -14,6 +14,7 @@ idf_component_register(
         "mqtt.cpp"
         "ota/OtaUpdater.cpp"
         "climate/ClimateSensor.cpp"
+        "climate/HumidityAverage.cpp"
         "pot/Potentiometer.cpp"
         "plate/PlateProbe.cpp"
         "control/VentilationPolicy.cpp"

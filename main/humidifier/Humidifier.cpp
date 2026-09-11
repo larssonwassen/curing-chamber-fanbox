@@ -181,13 +181,14 @@ void humidifier_task(void* arg) {
 			in.nowMs = nowMs;
 			in.humidityValid = ClimateSensor::isFresh();
 			in.humidity = ClimateSensor::humidity();
-			// The average VentilationPolicy already maintains, rather than a
-			// second filter over the same signal. A negative value is its
-			// "no reading yet" sentinel.
+			// The filter the climate sensor already maintains over the same
+			// signal, rather than a second one. "Ready" rather than merely
+			// "valid": a freshly seeded average is still the single sample it
+			// was seeded from, and seeding at the trough of a compressor cycle
+			// looks exactly like a dry chamber.
 			in.averageEnabled = shared_attributes->humidityAverageMinutes.get() > 0.0;
-			const double avg = telemetry->humidityAverage.get();
-			in.humidityAvgValid = avg >= 0.0;
-			in.humidityAvg = (float)avg;
+			in.humidityAvgValid = ClimateSensor::humidityAverageReady();
+			in.humidityAvg = ClimateSensor::humidityAverage();
 			in.plateConfigured = PlateProbe::isConfigured();
 			in.plateValid = PlateProbe::isFresh();
 			in.plateC = PlateProbe::temperature();
