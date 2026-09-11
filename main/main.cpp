@@ -406,7 +406,10 @@ static bool publish_control_state(JsonBuilder* jb, const ControlSnapshot& c) {
 }
 
 static void publish_control_state_task(void* arg) {
-	char buff[512];
+	// 1024, not 512: the six humidifier settings pushed this message to 504
+	// bytes of payload, which overflowed the old buffer once the closing brace
+	// and terminator were counted. Every other publish task here uses 1024.
+	char buff[1024];
 	JsonBuilder jb(buff, sizeof(buff));
 	while (true) {
 		waitForBit(MQTT_CONNECTED_BIT);
