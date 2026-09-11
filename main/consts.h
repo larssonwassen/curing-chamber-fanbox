@@ -54,11 +54,19 @@ public:
 	/// Evaporator plate temperature. Left at its initial value, and published
 	/// as null, when no probe is fitted -- see PlateProbe.
 	AtomicVariable<double> plateTemperature;
-	/// The filtered humidity the dry trigger actually reads. Published beside
-	/// the raw value because the difference between them is the whole point:
-	/// the raw trace crosses the trigger level every compressor cycle and this
-	/// one does not. Negative when the filter has no reading yet.
+	/// The filtered humidity the humidifier's raise trigger actually reads.
+	/// Maintained by ClimateSensor; see climate/HumidityAverage.h. Published
+	/// beside the raw value because the difference between them is the whole
+	/// point: the raw trace crosses the raise level every compressor cycle and
+	/// this one does not. Negative when the filter has no reading yet.
 	AtomicVariable<double> humidityAverage;
+	/// Humidifier fan speed, counted on its own tach line by PCNT. Zero while
+	/// the fan is commanded off, which is most of the time.
+	AtomicVariable<uint16_t> humidifierRPM;
+	/// Percentage of the last hour the humidifier has run. Published because a
+	/// humidifier sitting on its cap means the target cannot be met inside the
+	/// duty the tray and the mould risk allow.
+	AtomicVariable<double> humidifierDutyPercent;
 
 	Telemetry(void):
 		ChangeTrackable(),
@@ -71,7 +79,9 @@ public:
 		temperature(0.0f, nullptr, onChange, this),
 		humidity(0.0f, nullptr, onChange, this),
 		plateTemperature(0.0f, nullptr, onChange, this),
-		humidityAverage(-1.0f, nullptr, onChange, this)
+		humidityAverage(-1.0f, nullptr, onChange, this),
+		humidifierRPM(0, nullptr, onChange, this),
+		humidifierDutyPercent(0.0f, nullptr, onChange, this)
 	{}
 };
 extern Telemetry* telemetry;
@@ -86,22 +96,18 @@ public:
 	AtomicVariable<bool> otaOnDevBuild;
 	AtomicVariable<esp_log_level_t> uartLogLevel;
 	AtomicVariable<esp_log_level_t> streamerLogLevel;
-	AtomicVariable<double> humiditySetpoint;
-	/// How far below the setpoint the chamber must fall before humidity is
-	/// allowed to ask for an extra ventilation burst. There is no matching
-	/// overshoot limit any more: the fan cannot dry the chamber, so there is
-	/// nothing for it to do when humidity is high.
-	AtomicVariable<double> humidityUndershootLimit;
-	/// Time constant, in minutes, of the average the dry trigger reads instead
-	/// of the raw sensor. The chamber's own compressor swings humidity by tens
-	/// of points every half hour as frost goes onto the plate and comes back
-	/// off it; none of that swing means the chamber has gained or lost water.
-	/// Zero reads the sensor directly. See control/VentilationPolicy.h.
+	/// Time constant, in minutes, of the humidity average, which is what the
+	/// humidifier's raise trigger reads instead of the raw sensor. The
+	/// chamber's own compressor swings humidity by tens of points every half
+	/// hour as frost goes onto the plate and comes back off it; none of that
+	/// swing means the chamber has gained or lost water. Zero reads the sensor
+	/// directly. See climate/HumidityAverage.h.
 	AtomicVariable<double> humidityAverageMinutes;
 
 	// Ventilation schedule. See control/VentilationPolicy.h for what these
 	// mean together; the short version is that ventilation is a timer, not a
-	// setpoint controller, because fresh air rather than humidity is its job.
+	// controller. Humidity is not among them: the humidifier owns that now,
+	// and the exchange fan runs on the clock and the plate gate alone.
 	AtomicVariable<double> ventIntervalHours;
 	AtomicVariable<int32_t> ventFirstHourLocal;
 	AtomicVariable<double> ventBurstSeconds;
@@ -120,6 +126,37 @@ public:
 	/// persisted -- a burst request should not survive a reboot.
 	AtomicVariable<bool> ventNow;
 
+	// The humidifier box: a fan over a tray of distilled water, ducted back
+	// into the chamber. See humidifier/HumidifierPolicy.h for why its knobs are
+	// separate from ventilation's rather than shared.
+	//
+	/// Master switch, and the whole controller while ctrl_loop_enabled is
+	/// false. Off by default so a chamber with no box built yet behaves exactly
+	/// as it did before this firmware shipped.
+	AtomicVariable<bool> humidifierEnabled;
+	/// The humidity the chamber is supposed to sit at. The only humidity
+	/// setpoint in the firmware now: ventilation used to have one of its own,
+	/// which asked a far weaker actuator a different question and has gone
+	/// along with the coupling.
+	AtomicVariable<double> humidifierTargetRh;
+	/// How far below the target the average must fall before a burst starts.
+	/// The burst then runs until the raw reading reaches the target, so this is
+	/// the whole hysteresis band.
+	AtomicVariable<double> humidifierRaiseBandRh;
+	AtomicVariable<double> humidifierBurstSeconds;
+	/// Quiet time after a burst. Long, because the water a burst added has to
+	/// cross a duct, a chamber volume and a sensor time constant before it can
+	/// be measured -- and a settle shorter than that stacks bursts on top of
+	/// each other chasing a reading that has not caught up.
+	AtomicVariable<double> humidifierSettleMinutes;
+	/// Ceiling on the fraction of a rolling hour the fan may run. This is a
+	/// mould limit, not a capacity one: a fan held over a water tray at high
+	/// duty parks the chamber near saturation. Zero disables the cap.
+	AtomicVariable<double> humidifierMaxDutyPercent;
+	/// Edge-triggered: set it true in ThingsBoard to humidify now. Bypasses the
+	/// plate gate and the duty cap, so it is also the bench test. Not persisted.
+	AtomicVariable<bool> humidifyNow;
+
 	SharedAttributes():
 		ChangeTrackable(),
 		fanEnabled(true, "fe", onChange, this),
@@ -127,8 +164,6 @@ public:
 		otaOnDevBuild(false, "odb", onChange, this),
 		uartLogLevel(ESP_LOG_DEBUG, "ull", onChange, this),
 		streamerLogLevel(ESP_LOG_INFO, "sll", onChange, this),
-		humiditySetpoint(75.0, "hsp", onChange, this),
-		humidityUndershootLimit(5.0, "hus", onChange, this),
 		// Comfortably longer than the measured 31-47 minute compressor cycle.
 		humidityAverageMinutes(30.0, "ham", onChange, this),
 		// Twice a day, anchored at 06:00 and 18:00 local.
@@ -142,7 +177,14 @@ public:
 		ventMinSecondsPerDay(180.0, "vms", onChange, this),
 		ventMinDutyPercent(30, "vmp", onChange, this),
 		plateGateTempC(2.0, "pgt", onChange, this),
-		ventNow(false, nullptr, onChange, this)
+		ventNow(false, nullptr, onChange, this),
+		humidifierEnabled(false, "hen", onChange, this),
+		humidifierTargetRh(78.0, "htr", onChange, this),
+		humidifierRaiseBandRh(3.0, "hrb", onChange, this),
+		humidifierBurstSeconds(120.0, "hbs", onChange, this),
+		humidifierSettleMinutes(10.0, "hsm", onChange, this),
+		humidifierMaxDutyPercent(25.0, "hmd", onChange, this),
+		humidifyNow(false, nullptr, onChange, this)
 	{}
 };
 extern SharedAttributes* shared_attributes;
@@ -160,6 +202,13 @@ public:
 	/// moves no air is indistinguishable from one that worked, unless this is
 	/// reported.
 	AtomicVariable<bool> fanStalled;
+	/// Current HumidifierState, as its underlying integer.
+	AtomicVariable<int32_t> humidifierState;
+	/// The humidifier reported RPM on its last sample.
+	AtomicVariable<bool> humidifierRunning;
+	/// Commanded on, tachometer reading zero. The fan sits in a saturated
+	/// airstream over standing water, which is where a bearing goes to die.
+	AtomicVariable<bool> humidifierStalled;
 
 	Attributes():
 		ChangeTrackable(),
@@ -167,7 +216,10 @@ public:
 		fanRunning(false, nullptr, onChange, this),
 		ventState(0, nullptr, onChange, this),
 		ventNextSeconds(-1, nullptr, onChange, this),
-		fanStalled(false, nullptr, onChange, this)
+		fanStalled(false, nullptr, onChange, this),
+		humidifierState(0, nullptr, onChange, this),
+		humidifierRunning(false, nullptr, onChange, this),
+		humidifierStalled(false, nullptr, onChange, this)
 	{}
 };
 extern Attributes* attributes;

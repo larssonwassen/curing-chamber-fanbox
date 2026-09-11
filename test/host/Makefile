@@ -10,7 +10,8 @@ MAIN := ../../main
 CXXFLAGS := -std=c++17 -g -O1 -Wall -Wextra -Wno-unused-parameter \
             -fsanitize=address,undefined -fno-omit-frame-pointer
 
-TESTS := test_json_parser test_util test_json_builder test_ventilation_policy
+TESTS := test_json_parser test_util test_json_builder test_ventilation_policy \
+         test_humidifier_policy test_humidity_average
 
 .PHONY: all clean
 all: $(TESTS)
@@ -29,6 +30,14 @@ test_json_builder: test_json_builder.cpp $(MAIN)/JsonBuilder/JsonBuilder.cpp
 # The ventilation policy is deliberately free of ESP-IDF and FreeRTOS, so it
 # compiles here as-is -- no stubs needed.
 test_ventilation_policy: test_ventilation_policy.cpp $(MAIN)/control/VentilationPolicy.cpp
+	$(CXX) $(CXXFLAGS) -I$(MAIN) $^ -o $@
+
+# Same deal for the humidifier policy: no IDF, no FreeRTOS, no stubs.
+test_humidifier_policy: test_humidifier_policy.cpp $(MAIN)/humidifier/HumidifierPolicy.cpp
+	$(CXX) $(CXXFLAGS) -I$(MAIN) $^ -o $@
+
+# And the humidity filter, which is plain arithmetic over a millisecond clock.
+test_humidity_average: test_humidity_average.cpp $(MAIN)/climate/HumidityAverage.cpp
 	$(CXX) $(CXXFLAGS) -I$(MAIN) $^ -o $@
 
 clean:
