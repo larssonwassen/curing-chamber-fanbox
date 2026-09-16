@@ -6,9 +6,10 @@ MQTT. Air enters through a vent at the bottom of the fridge and leaves through t
 the top; temperature is held by an external Inkbird controller switching the compressor.
 
 **Ventilation is a timer, not a humidity controller.** The fan's job is fresh air: a
-couple of bounded bursts a day, at wall-clock times. Humidity can *ask for more* air when
-the chamber is drying out faster than intended, but it can never ask for less, because
-the fan has no way to dry the chamber -- only the evaporator plate does that.
+couple of bounded bursts a day, at wall-clock times, whatever the chamber reads. Humidity
+is a separate box with its own fan -- see [Humidifier](#humidifier) -- because the
+exchange fan never had the authority to move it. The one measurement ventilation does
+listen to is the evaporator plate, and only ever to hold a burst back.
 
 That distinction is the whole point of this rework. The previous firmware ran the fan as
 a bang-bang humidity controller, holding it on for hours at a time. Room air at 20-24 °C
@@ -23,10 +24,9 @@ The safeguards that follow from that:
 - Every burst has an end. Nothing in the state machine can hold the fan on indefinitely.
 - An optional probe on the evaporator plate lets a cold plate **defer** a burst until it
   warms and drains, up to a bounded timeout.
-- A burst is not a commitment. Its reasons are re-read on every tick, so a plate that goes
-  cold or a chamber that stops being dry ends the burst early.
-- A daily minimum of fan time is spread across the day, so a chamber that never asks for
-  air still gets some.
+- A burst is not a commitment. The plate is re-read on every tick, so a plate that goes
+  cold ends the burst early.
+- A daily minimum of fan time is spread across the day rather than saved for midnight.
 
 Fan speed is set by a panel potentiometer; ventilation decides only *when* the fan runs,
 and enforces a minimum duty while it does so that a knob turned to zero cannot silently
@@ -46,6 +46,7 @@ ESP-IDF 6.0.
 | Climate sensor | SHT31 — temperature + relative humidity, I²C `0x44` |
 | Speed control | Potentiometer on ADC1 channel 0 |
 | Fan power | Switched on `D2` |
+| Humidifier | Fan over a water tray, switched on `D4`, tachometer on `D3` — see [Humidifier](#humidifier) |
 | Plate probe | DS18B20 on 1-Wire, optional — see [Plate probe](#plate-probe) |
 
 Board photos are in `ESP32-S3-Nano_Version3.jpg` and `ESP32-S3-Nano_Version4.jpg`.
@@ -58,6 +59,8 @@ Board photos are in `ESP32-S3-Nano_Version3.jpg` and `ESP32-S3-Nano_Version4.jpg
 | I²C SCL | `A5` | 12 |
 | Potentiometer | `A0` | 1 |
 | Fan enable | `D2` | 5 |
+| Humidifier tach | `D3` | 6 |
+| Humidifier enable | `D4` | 7 |
 | Plate probe 1-Wire | `D13` | 48 |
 
 Full board mapping is in [`main/pins.h`](main/pins.h).
@@ -70,7 +73,7 @@ optionally persist to NVS:
 | Task | Period | Role |
 |---|---|---|
 | `VentilationTask` | 1 s | Runs the ventilation state machine, switches the fan, detects a stall |
-| `ClimateSensorTask` | 1 s | Reads temperature and humidity from the SHT31 |
+| `ClimateSensorTask` | 1 s | Reads temperature and humidity from the SHT31, and maintains the humidity average |
 | `PlateProbeTask` | 5 s | Reads the evaporator plate temperature, if a probe is fitted |
 | `PotentiometerTask` | 250 ms | Samples the knob, maps it to a 0–255 duty cycle |
 | `FanTask` | 100 ms | Applies duty cycle to the EMC2101, reads back tachometer RPM |
@@ -79,8 +82,8 @@ optionally persist to NVS:
 
 The decision logic itself is deliberately separate from the task that runs it.
 [`main/control/VentilationPolicy`](main/control/VentilationPolicy.h) is a pure state
-machine with no ESP-IDF dependency: it takes a timestamp, a humidity reading, a plate
-reading and the settings, and returns whether the fan should be on. That is what makes it
+machine with no ESP-IDF dependency: it takes a timestamp, a plate reading and the
+settings, and returns whether the fan should be on. That is what makes it
 testable on the host — see [Tests](#tests) — which matters more here than usual, since the
 failure it exists to prevent takes a day to reproduce on hardware.
 
@@ -93,85 +96,63 @@ clock is synced and to time since boot when it is not. The burst then has to get
 plate gate: if a probe is fitted and reads below `plate_gate_temp_c` — or has gone stale,
 which is treated as cold — the burst waits in `pending` until the plate warms.
 
-What happens if it never warms depends on *why* the burst was asked for. Air exchange has
-to happen eventually, so a scheduled or make-up burst goes ahead anyway once
-`vent_max_defer_minutes` runs out. A humidity burst never does: forcing moist air onto
-sub-zero metal is the mechanism that armoured the evaporator in the first place, and
-nothing goes wrong if it waits, because the fan cannot dry the chamber — a humidity burst
-that never runs is one that was not needed.
+If it never warms, the burst goes ahead anyway once `vent_max_defer_minutes` runs out.
+Stale air is a real problem and a burst owed since this morning has to happen eventually.
+The humidifier deliberately has no such timeout — it can afford to wait forever and air
+exchange cannot — which is the one place the two policies disagree.
+
+**Ventilation does not read humidity at all.** It used to: the exchange fan was the only
+actuator that could raise humidity, so a dry chamber could ask for extra bursts, and a good
+deal of this policy existed to keep that trigger from doing harm. Its measured authority
+was never much — doubling the fan's daily run time moved the chamber 0.66 RH points,
+because room air pulled into a 10 °C chamber carries roughly the chamber's own moisture.
+The [humidifier](#humidifier) does that job now, with real authority and a duty cap of its
+own, so the exchange fan gives it up entirely. There is no humidity input, no humidity
+setpoint and no dry trigger left here; ventilation is a timer with a safety gate.
 
 **Nothing latches.** The policy keeps history — when the last burst ran, which slot has
-been served, how much fan time the day has had — but not intent. A burst that is owed and
-a burst that is running both re-read the plate and the humidity every second, and stop as
-soon as their reasons stop holding. This is not a refinement; it is the difference between
-the gate working and the gate being decorative. Two failures on the real chamber came from
-the earlier latching version:
-
-- A burst started the instant the plate touched the gate on its way up, the compressor cut
-  back in, and the fan kept running for another 85 seconds while the plate dived to
-  −2.6 °C — pushing moist room air onto sub-zero metal, which is the exact event the gate
-  exists to prevent.
-- A humidity burst raised at 63% RH waited seven minutes for the plate and then fired into
-  a chamber that had climbed to 72.7%, above its own setpoint. Humidity rises steeply
-  exactly while a burst is pending, because the same warming plate that opens the gate is
-  giving its frost back to the air.
+been served, how much fan time the day has had — but not intent. A burst that is owed and a
+burst that is running both re-read the plate every second, and stop as soon as it stops
+holding. This is not a refinement; it is the difference between the gate working and the
+gate being decorative. It came from a failure on the real chamber: a burst started the
+instant the plate touched the gate on its way up, the compressor cut back in, and the fan
+kept running for another 85 seconds while the plate dived to −2.6 °C — pushing moist room
+air onto sub-zero metal, which is the exact event the gate exists to prevent.
 
 Re-reading conditions continuously invites the opposite failure — a condition sitting on
-its threshold cycling the fan at the loop rate — so three things bound it. A humidity burst
-is *raised* at `humidity_setpoint - humidity_undershoot_limit` but *held* until
-`humidity_setpoint`, which is a deadband made of numbers that were already configured. The
-plate must fall 0.3 °C below `plate_gate_temp_c` before it cuts a running burst, which is
-three counts of the DS18B20's resolution and so cannot be triggered by quantisation noise.
-And no burst may be stopped inside its first five seconds, whatever the reason. A burst
-that overrode the gate to start — a manual request, or a scheduled one deferred past
+its threshold cycling the fan at the loop rate — so two things bound it. The plate must
+fall 0.3 °C below `plate_gate_temp_c` before it cuts a running burst, which is three counts
+of the DS18B20's resolution and so cannot be triggered by quantisation noise. And no burst
+may be stopped inside its first five seconds, whatever the reason. A burst that overrode
+the gate to start — a manual request, or a scheduled one deferred past
 `vent_max_defer_minutes` — is not subject to the gate afterwards, since cutting it off on
 the first tick would amount to never having forced it through.
 
-There is no daily cap on humidity-driven bursts. Burst-then-settle is the bound, and how
-tight a bound depends on `vent_settle_minutes`: at the 1.5-minute default a chamber with
-humidity pinned at the floor cycles at about 50% duty, while a longer settle trades
-responsiveness for a lower ceiling. Either way every burst ends, and the plate gate stops
-the cycle outright once the evaporator goes cold — which is the protection that matters,
-the duty ceiling being a second line rather than the first. After a burst the machine
-sits in `settling` for `vent_settle_minutes`, long enough for the chamber to mix and the
-SHT31 to catch up, before any new trigger is considered.
+After a burst the machine sits in `settling` for `vent_settle_minutes` before any new
+trigger is considered.
 
-Four things can trigger a burst:
+Three things can trigger a burst:
 
 | Trigger | Condition |
 |---|---|
 | scheduled | the interval elapsed |
-| dry | *average* humidity below `humidity_setpoint − humidity_undershoot_limit` |
 | make-up | the day's fan time is behind the prorated share of `vent_min_seconds_per_day` |
 | manual | `vent_now` set in ThingsBoard — bypasses the plate gate |
 
-The dry trigger reads an average, not the sensor. This chamber's own compressor swings
-relative humidity by tens of points every half hour: measured over one clean 47-minute
-cycle with the fan idle, the air went from 3.38 to 6.60 g water per kg — half its own peak
-— as frost formed on the sub-zero plate and came back off it, and RH swung 27 points with
-it. An instantaneous reading therefore reports compressor phase at least as much as it
-reports how much water the chamber holds, and a trigger raised on it fires at the trough of
-every cycle regardless of the chamber's actual state. `humidity_average_minutes` sets the
-time constant of a first-order filter on that reading; at the 30-minute default, against a
-31–47 minute cycle, a ±13.5 point swing arrives at the trigger as ±2.5. Set it to zero to
-read the sensor directly. The filtered value is published as `humidity_avg` beside the raw
-`humidity`, because the gap between the two traces is the thing worth seeing. The trigger
-stays silent for one full time constant after boot, since until then the average is still
-mostly the single reading it was seeded from.
-
-Only the raise reads the average; a burst already running stops on the raw reading. The two
-questions are different. "Is this chamber dry?" is about the chamber's state, and the swing
-has to come out of it first. "Has this burst delivered enough air yet?" is about what the
-fan just did, and the filter is deliberately far too slow to see that.
+With humidity out of the picture, `vent_interval_hours` and `vent_min_seconds_per_day` are
+the whole dosage: the first says how often, the second is a floor on the daily total that
+is topped up with make-up bursts spread across the day rather than saved for a lump at
+midnight.
 
 Whatever asked for it, **a burst serves the schedule slot it ends in**. Fresh air is fresh
-air, so a humidity burst at 07:00 satisfies the 06:00 slot and no scheduled burst follows.
+air, so a manual burst at 07:00 satisfies the 06:00 slot and no scheduled burst follows.
 Without this the schedule cannot tell that the chamber has just been ventilated: on
-2026-09-09 a humidity burst finished ten seconds into the 18:00 slot, the scheduled burst
-ran ninety seconds later, and between them they took the chamber from 63% to 87% RH.
-`vent_min_seconds_per_day` remains the floor on total air, so displacing scheduled bursts
-this way cannot starve the chamber. The no-clock path always behaved this way, because it
-measures the interval from the end of the last burst rather than from a slot boundary.
+2026-09-09, when humidity could still raise bursts of its own, one finished ten seconds
+into the 18:00 slot, the scheduled burst ran ninety seconds later, and between them they
+took the chamber from 63% to 87% RH. `vent_min_seconds_per_day` remains the floor on total
+air, so displacing scheduled bursts this way cannot starve the chamber. The no-clock path
+always behaved this way, because it measures the interval from the end of the last burst
+rather than from a slot boundary.
 
 `vent_now` is edge-triggered: ThingsBoard holds a shared attribute until something clears
 it, so a level trigger would ventilate forever. Only the rising edge counts, and the
@@ -184,6 +165,77 @@ middle of a day credits the part of the day already elapsed, so a device that re
 Setting `ctrl_loop_enabled` false hands the fan to `fan_enabled` directly. The policy is
 left running rather than reset, so switching automatic back on resumes the schedule
 instead of restarting it.
+
+### Humidifier
+
+A second box inside the chamber: a fan blowing over a tray of distilled water with a
+sanitiser in it, ducted back into the chamber air. It exists because the exchange fan is
+a weak humidity actuator — measured over a full day, doubling its run time moved the
+chamber 0.66 RH points, because room air pulled into a 10 °C chamber carries roughly the
+chamber's own moisture. Air leaving a saturated tray does not.
+
+Off by default. Set `humidifier_enabled` to bring it into the loop; until then the
+firmware behaves exactly as it did before the box existed.
+
+Three behaviours come from the ventilation policy as it was when the exchange fan still
+had the humidity job, for the reasons documented there. A burst is **raised** on the
+filtered average and **held** on the raw reading. Conditions are re-read every tick rather
+than latched when the burst was raised — a request that waited out a cold plate for seven
+minutes is a request about a chamber that no longer exists, and on 2026-09-09 one raised at
+63 % RH fired into a chamber that had climbed to 72.7 %. And the raise and hold thresholds
+differ (`humidifier_target_rh − humidifier_raise_band_rh` up to `humidifier_target_rh`) so
+a reading parked on a threshold cannot chatter the FET.
+
+**The raise reads an average, not the sensor.** This chamber's own compressor swings
+relative humidity by tens of points every half hour: measured over one clean 47-minute
+cycle with the fan idle, the air went from 3.38 to 6.60 g water per kg — half its own peak
+— as frost formed on the sub-zero plate and came back off it, and RH swung 27 points with
+it. An instantaneous reading therefore reports compressor phase at least as much as it
+reports how much water the chamber holds, and a trigger raised on it fires at the trough of
+every cycle regardless of the chamber's actual state. `humidity_average_minutes` sets the
+time constant of a first-order filter, maintained by
+[`main/climate/HumidityAverage`](main/climate/HumidityAverage.h) beside the sensor that
+produces the raw signal; at the 30-minute default a ±13.5 point swing at the measured
+45-minute period arrives as ±3. Set it to zero to read the sensor directly. The filtered
+value is published as `humidity_avg` beside the raw `humidity`, because the gap between the
+two traces is the thing worth seeing. The raise stays silent for one full time constant
+after boot, since until then the average is still mostly the single reading it was seeded
+from.
+
+Only the raise reads the average; a burst already running stops on the raw reading. The two
+questions are different. "Is this chamber dry?" is about the chamber's state, and the swing
+has to come out of it first. "Has this burst delivered enough water yet?" is about what the
+fan just did, and the filter is deliberately far too slow to see that.
+
+One behaviour is deliberately **not** inherited. Ventilation forces a burst past a cold
+plate after `vent_max_defer_minutes`, because stale air is a real problem and a scheduled
+burst has to happen sometime. Humidification never forces. Blowing saturated air onto
+sub-zero metal is the mechanism that armoured the evaporator in ice in the first place,
+and nothing goes wrong if it waits — a chamber that is too dry stays too dry, which is
+slow and reversible. Frost on the plate is neither. A configured probe that has stopped
+reading is treated as cold, with no timeout to rescue it; `humidifier_state` parked in
+`pending` is how that becomes visible.
+
+`humidifier_max_duty_percent` caps run time over a rolling hour, measured in five-minute
+buckets. This is a mould limit, not a capacity one: a fan held over a water tray at high
+duty parks the chamber near saturation, and what grows at 90 % RH on a curing surface is
+not what is wanted. A humidifier sitting on its cap means the target cannot be reached
+within that limit — either the target is too high for the chamber or the tray has run dry,
+and `humidifier_duty_percent` is the telemetry that distinguishes them.
+
+`humidifier_settle_minutes` defaults to 10, far longer than ventilation's 1.5. The water a
+burst adds has to cross a duct, a chamber volume and a sensor time constant before it can
+be measured; a shorter settle stacks bursts chasing a reading that has not caught up.
+
+The switch is a 2N7000 inverting into a high-side IRF4905. High-side rather than low-side
+for two reasons: the fan sits over standing water, so its wiring should be dead rather
+than at +12 V when off, and the tach transistor is referenced to the fan's ground pin,
+which a low-side switch would leave floating and the tach unreadable. The tach is counted
+by PCNT with a 1 µs glitch filter, at two pulses per revolution.
+
+Setting `ctrl_loop_enabled` false hands the humidifier to `humidifier_enabled` directly,
+the same as it hands the exchange fan to `fan_enabled`. That is the lockout to use when
+working inside the box.
 
 ### Plate probe
 
@@ -233,20 +285,24 @@ Arduino-flavoured I²C abstraction ([`main/I2C`](main/I2C)).
 **Telemetry** → `v1/devices/me/telemetry`
 
 `fan_duty_cycle`, `fan_rpm`, `temperature`, `humidity`, `plate_temperature`,
-`vent_state` (0 idle, 1 pending, 2 running, 3 settling) and `vent_gate_blocked`, plus
-batched `log` objects. These are published every five seconds.
+`vent_state` (0 idle, 1 pending, 2 running, 3 settling) and `vent_gate_blocked`,
+`humidifier_state` (same four values), `humidifier_gate_blocked`, `humidifier_rpm` and
+`humidifier_duty_percent`, plus batched `log` objects. These are published every five
+seconds.
 
-`vent_state` is sampled rather than reported on change, which it used to be, because a
+`vent_state` and `humidifier_state` are sampled rather than reported on change, which it used to be, because a
 chart cannot draw a state that only appears when it moves. Between two change events there
 are no points at all, so the line is drawn straight across the gap — and a settling-to-idle
 ramp passes through the level that means pending on the way down, showing a state the
 chamber was never in. Sampling also makes the average honest: over a day the mean of
 `vent_gate_blocked` is the fraction of the day ventilation spent vetoed, whereas the mean
-of a change event counts transitions rather than time.
+of a change event counts transitions rather than time. `humidifier_duty_percent` is
+already a rolling-hour average on the device, so sampling it gives a chart of how close
+the box has been running to its cap.
 
 The settings that shape the control loop are published as telemetry too, but **only when
-they change**: `ctrl_loop_enabled` and every `vent_*` / `humidity_*` / `plate_gate_temp_c`
-setting. A setpoint holds for days, so sampling one alongside the sensors would store the
+they change**: `ctrl_loop_enabled` and every `vent_*` / `humidity_*` / `humidifier_*` /
+`plate_gate_temp_c` setting. A setpoint holds for days, so sampling one alongside the sensors would store the
 same number a million times to describe an event that happened twice. One snapshot is also
 published on every MQTT connect, so a chart has something to anchor to after a reboot
 instead of waiting hours for the first change.
@@ -267,12 +323,18 @@ frozen value.
 **Attributes** → `v1/devices/me/attributes`
 
 `fan_running`, `fan_enabled`, `vent_state`, `vent_next_seconds`, `plate_probe`,
-`fan_stalled`, `ram_free`, `ram_total`.
+`fan_stalled`, `humidifier_state`, `humidifier_running`, `humidifier_stalled`,
+`ram_free`, `ram_total`.
 
 `vent_next_seconds` is `-1` when nothing is scheduled. `fan_stalled` goes true when the
 fan has been commanded on for five seconds and the tachometer still reads zero — most
 often the speed knob turned to zero, which otherwise looks exactly like a working
 ventilation burst from every other reading on the dashboard.
+
+`humidifier_stalled` is the same alarm for the humidifier, at three seconds. It earns its
+keep more than the exchange fan's does: that fan sits in a saturated airstream directly
+above standing water, which is where a sleeve bearing goes to die, and it will fail
+silently — the chamber simply drifts dry over a week.
 
 **Shared attributes** (set from ThingsBoard, persisted to NVS on the device). Telemetry
 is *not* persisted — see [Flash wear](#flash-wear):
@@ -291,14 +353,25 @@ is *not* persisted — see [Flash wear](#flash-wear):
 | `vent_max_defer_minutes` | `360.0` | How long a cold plate may hold a burst back |
 | `vent_min_duty_percent` | `30` | Minimum fan duty while a burst runs, regardless of the knob |
 | `plate_gate_temp_c` | `2.0` | Plate temperature a burst needs to see before it runs |
-| `humidity_setpoint` | `75.0` | Target relative humidity, % |
-| `humidity_undershoot_limit` | `5.0` | Humidity asks for an extra burst below setpoint − this |
-| `humidity_average_minutes` | `30.0` | Time constant of the average the dry trigger reads; `0` reads the sensor |
+| `humidity_average_minutes` | `30.0` | Time constant of the humidity average; `0` reads the sensor directly |
+| `humidifier_enabled` | `false` | Master switch for the humidifier; also the manual state when automatic control is off |
+| `humidify_now` | `false` | Rising edge humidifies immediately, ignoring the plate gate and the duty cap. Not persisted |
+| `humidifier_target_rh` | `78.0` | Humidity the humidifier aims for, % |
+| `humidifier_raise_band_rh` | `3.0` | A burst starts when the average falls below target − this |
+| `humidifier_burst_seconds` | `120.0` | Length of one humidifier burst |
+| `humidifier_settle_minutes` | `10.0` | Quiet period after a burst, long enough for the water to reach the sensor |
+| `humidifier_max_duty_percent` | `25.0` | Ceiling on humidifier run time over a rolling hour; `0` disables the cap |
 | `uart_log_level` | `DEBUG` | Console log level |
 | `streamer_log_level` | `INFO` | Level threshold for logs shipped over MQTT |
 
-There is no overshoot limit any more. It described the fan switching *off* above a
-humidity threshold, and the fan cannot lower humidity, so it never meant anything.
+`humidity_setpoint` and `humidity_undershoot_limit` are gone. They were the exchange fan's
+humidity trigger, which the humidifier replaced; `humidifier_target_rh` and
+`humidifier_raise_band_rh` are their successors, asked of an actuator that can actually
+answer. Delete them from the ThingsBoard dashboard — the firmware no longer subscribes to
+them, so they sit there doing nothing.
+
+There is no overshoot limit either, and never was one worth having: it would describe
+switching *off* above a humidity threshold, and nothing in this box can lower humidity.
 
 ## Building
 
@@ -473,8 +546,8 @@ device list instead.
 
 ### Tests
 
-The parsing code and the ventilation state machine are target-independent and have host
-tests under ASan/UBSan:
+The parsing code, both control state machines and the humidity filter are
+target-independent and have host tests under ASan/UBSan:
 
 ```bash
 make -C test/host
@@ -482,9 +555,20 @@ make -C test/host
 
 [`test/host/test_ventilation_policy.cpp`](test/host/test_ventilation_policy.cpp) covers
 the bounds that keep the plate clear: bursts end, a cold plate defers and a stale probe
-does not defer forever, humidity only ever asks for more air, the daily counters reset on
-a day boundary, and scheduling survives the 32-bit millisecond wrap that arrives every
-49 days.
+does not defer forever, a plate sitting on the gate cannot chatter the relay, the daily
+counters reset on a day boundary, and scheduling survives the 32-bit millisecond wrap that
+arrives every 49 days.
+
+[`test/host/test_humidifier_policy.cpp`](test/host/test_humidifier_policy.cpp) covers the
+humidifier's equivalents: bursts end, the raise and hold thresholds are genuinely
+different, a raw trough with a healthy average raises nothing, a cold plate vetoes
+indefinitely and is never overridden, a pending request is withdrawn once the chamber is
+wet again, and the duty cap holds run time to its share of a rolling hour.
+
+[`test/host/test_humidity_average.cpp`](test/host/test_humidity_average.cpp) covers the
+filter both of those used to share: a compressor swing averages to its mean, the average
+refuses to call itself ready for a full time constant, a sensor dropout freezes it rather
+than decaying it towards a chamber that looks dry, and it survives the millisecond wrap.
 
 ## Updates
 

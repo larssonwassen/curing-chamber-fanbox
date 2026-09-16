@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "SHT31/SHT31.h"
 #include "consts.h"
+#include "HumidityAverage.h"
 
 static const char* TAG = "climate";
 
@@ -20,6 +21,15 @@ volatile float    s_temperature = 0.0f;
 volatile float    s_humidity = 0.0f;
 volatile uint32_t s_lastOkMs = 0;
 volatile bool     s_everOk = false;
+
+// The filtered humidity, maintained beside the raw one because a raw reading in
+// this chamber mostly reports where the compressor is. See HumidityAverage.h.
+// Written only by the sampling task; the three scalars below are what other
+// tasks read, for the same alignment reason as the raw values above.
+HumidityAverage   s_humidityAvg;
+volatile float    s_humidityAvgValue = 0.0f;
+volatile bool     s_humidityAvgValid = false;
+volatile bool     s_humidityAvgReady = false;
 
 // Thirty consecutive failed reads at one per second. Long enough to ride out a
 // transient bus error, short enough that ventilation is not asked for on the
@@ -60,6 +70,14 @@ void climate_sensor_task(void* arg) {
 			telemetry->humidity.set(humidity);
 			s_lastOkMs = (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount());
 			s_everOk = true;
+			s_humidityAvg.update((uint32_t)pdTICKS_TO_MS(xTaskGetTickCount()), true, humidity,
+								 (float)shared_attributes->humidityAverageMinutes.get());
+			s_humidityAvgValue = s_humidityAvg.value();
+			s_humidityAvgValid = s_humidityAvg.valid();
+			s_humidityAvgReady = s_humidityAvg.ready();
+			// Negative stands for "no reading yet", and is published as null.
+			telemetry->humidityAverage.set(
+				s_humidityAvg.valid() ? (double)s_humidityAvg.value() : -1.0);
 		} else {
 			ESP_LOGE(TAG, "Failed to read climate sensor data");
 		}
@@ -94,4 +112,16 @@ float ClimateSensor::temperature(void) {
 
 float ClimateSensor::humidity(void) {
 	return s_humidity;
+}
+
+float ClimateSensor::humidityAverage(void) {
+	return s_humidityAvgValue;
+}
+
+bool ClimateSensor::humidityAverageValid(void) {
+	return s_humidityAvgValid;
+}
+
+bool ClimateSensor::humidityAverageReady(void) {
+	return s_humidityAvgReady;
 }

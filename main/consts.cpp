@@ -37,16 +37,27 @@ void log_nvs_stats(const char* when) {
 /**
  * @brief Erase NVS keys that this firmware no longer uses.
  *
- * Telemetry no longer carries NVS keys (see Telemetry in consts.h), so these
- * entries are dead weight in an already heavily worn partition. Erasing them is
- * a one-shot cost: after the first boot on this firmware the keys are gone and
- * every subsequent call is a no-op that writes nothing.
+ * Two reasons, and the second is the one that matters. These entries are dead
+ * weight in an already heavily worn partition -- but they are also a trap for
+ * whoever adds the next attribute, because the keys here are two and three
+ * characters long and collide easily. A future attribute that happened to pick
+ * a name already sitting in flash would silently inherit a stale value on its
+ * first boot, which is a bug that only appears on devices that have been in
+ * service. Erasing is a one-shot cost: after the first boot on this firmware
+ * the keys are gone and every subsequent call writes nothing.
  */
-static void purge_legacy_telemetry_keys(void) {
-	// "hos" was humidity_overshoot_limit, from when the fan chased a setpoint
-	// in both directions. The fan cannot dry the chamber, so there is no
-	// overshoot behaviour left for it to configure.
-	static const char* const legacy_keys[] = { "fd", "fr", "t", "h", "hos" };
+static void purge_legacy_nvs_keys(void) {
+	// "fd", "fr", "t" and "h" were telemetry, back when telemetry was persisted
+	// at all (see Telemetry in consts.h for why it no longer is).
+	//
+	// The other three are the exchange fan's humidity controller, removed in
+	// stages as the fan gave that job up. "hos" was humidity_overshoot_limit,
+	// from when the fan chased a setpoint in both directions -- it cannot dry
+	// the chamber, so there was never anything to configure. "hsp" and "hus"
+	// were humidity_setpoint and humidity_undershoot_limit, which went when the
+	// humidifier took over raising humidity; humidifier_target_rh and
+	// humidifier_raise_band_rh are their successors.
+	static const char* const legacy_keys[] = { "fd", "fr", "t", "h", "hos", "hsp", "hus" };
 
 	nvs_handle_t handle;
 	esp_err_t err = nvs_open("atomic_vars", NVS_READWRITE, &handle);
@@ -62,7 +73,7 @@ static void purge_legacy_telemetry_keys(void) {
 	for (size_t i = 0; i < sizeof(legacy_keys) / sizeof(legacy_keys[0]); i++) {
 		err = nvs_erase_key(handle, legacy_keys[i]);
 		if (err == ESP_OK) {
-			ESP_LOGI(TAG, "Purged legacy telemetry NVS key '%s'", legacy_keys[i]);
+			ESP_LOGI(TAG, "Purged legacy NVS key '%s'", legacy_keys[i]);
 			erased_any = true;
 		} else if (err != ESP_ERR_NVS_NOT_FOUND) {
 			ESP_LOGW(TAG, "nvs_erase_key('%s') failed: %s", legacy_keys[i], esp_err_to_name(err));
@@ -85,7 +96,7 @@ void init_consts(void) {
 	configASSERT(network_state_event_group);
 
 	log_nvs_stats("boot");
-	purge_legacy_telemetry_keys();
+	purge_legacy_nvs_keys();
 
 	shared_attributes = new SharedAttributes();
 	configASSERT(shared_attributes);

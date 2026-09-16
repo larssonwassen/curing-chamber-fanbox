@@ -19,6 +19,20 @@ bool isFresh(void);
 float temperature(void);
 float humidity(void);
 
+/// Chamber humidity filtered over a compressor cycle, with its time constant
+/// taken from the `humidity_average_minutes` shared attribute. Anything asking
+/// "is this chamber dry?" wants this rather than humidity(); see
+/// HumidityAverage.h for why.
+float humidityAverage(void);
+
+/// True once any reading has seeded the average. It is meaningful from here
+/// on, which is when it starts being published as telemetry.
+bool humidityAverageValid(void);
+
+/// True once the average has been running for a full time constant. A control
+/// decision about dryness should wait for this, not merely for valid.
+bool humidityAverageReady(void);
+
 } // namespace ClimateSensor
 
 #endif // _CLIMATE_SENSOR_H

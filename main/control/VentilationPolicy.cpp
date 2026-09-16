@@ -96,120 +96,6 @@ bool VentilationPolicy::scheduledDue(const VentilationInputs& in, const Ventilat
 	return since >= intervalMs;
 }
 
-/// Advance the humidity filter. First-order, evaluated from elapsed time
-/// rather than from a tick count, so it does not depend on the caller's
-/// cadence and survives a missed update.
-void VentilationPolicy::updateHumidityAverage(const VentilationInputs& in, const VentilationSettings& cfg) {
-	if (!in.humidityValid) {
-		// Hold the last average rather than decaying it towards nothing. A
-		// dropout should freeze the filter, not slowly invent a dry chamber.
-		return;
-	}
-	if (!humidityAvgValid_) {
-		humidityAvgValid_ = true;
-		humidityAvg_ = in.humidity;
-		humidityAvgMs_ = in.nowMs;
-		humidityAvgSeedMs_ = in.nowMs;
-		return;
-	}
-	const float tauMs = cfg.humidityAverageMinutes * 60000.0f;
-	float alpha = 1.0f;
-	if (tauMs > 0.0f) {
-		alpha = (float)elapsed_ms(in.nowMs, humidityAvgMs_) / tauMs;
-		if (alpha > 1.0f) {
-			// A long gap -- a stall, or the first update after a wrap. Adopt
-			// the current reading instead of extrapolating a filter that has
-			// no information about what happened in between.
-			alpha = 1.0f;
-		}
-	}
-	humidityAvg_ += (in.humidity - humidityAvg_) * alpha;
-	humidityAvgMs_ = in.nowMs;
-}
-
-bool VentilationPolicy::dryRequest(const VentilationInputs& in, const VentilationSettings& cfg) const {
-	if (!in.humidityValid) {
-		// A stale reading simply means humidity gets no vote. It does not stop
-		// scheduled ventilation: bursts are bounded, so a sensor failure can no
-		// longer leave the fan running indefinitely the way the old setpoint
-		// loop could.
-		return false;
-	}
-	if (everBurst_) {
-		const uint32_t settleMs = (uint32_t)(cfg.settleMinutes * 60000.0f);
-		if (elapsed_ms(in.nowMs, burstEndedMs_) < settleMs) {
-			return false;
-		}
-	}
-	const float raiseBelow = cfg.humiditySetpoint - cfg.humidityUndershoot;
-	// Raised on the average, not on the reading. The trough of every compressor
-	// cycle looks like a dry chamber: the plate gives its frost back to the air
-	// on the warm half of the cycle and takes it again on the cold half, which
-	// is worth tens of points of relative humidity in either direction and says
-	// nothing at all about how much water the chamber actually holds.
-	//
-	// Requiring the raw reading to agree, as this did at first, quietly undoes
-	// that. The two are only both below the line at the bottom of a cycle,
-	// which is exactly when the plate is coldest and the gate is shut. Measured
-	// on 2026-09-09 with the gate at 2 C: the raw reading was under the raise
-	// level 63% of the time and the plate was above the gate 56% of the time,
-	// but the two overlapped only 22% of the time, and one of that evening's
-	// four gate openings arrived to find the raw reading had already climbed
-	// back over the line. A trigger that may only speak while the plate is
-	// frozen is a trigger that rarely gets to act.
-	//
-	// Holding is a different question and still reads the raw value; see
-	// dryHolds(). "Is this chamber dry?" is about its state and needs the
-	// filter. "Has this burst delivered enough yet?" is about what the fan just
-	// did, which the filter is deliberately too slow to see.
-	if (cfg.humidityAverageMinutes > 0.0f) {
-		const uint32_t tauMs = (uint32_t)(cfg.humidityAverageMinutes * 60000.0f);
-		// Until the filter has seen a full time constant it is still mostly the
-		// single reading it was seeded from, and seeding at the trough of a
-		// cycle would look exactly like a dry chamber. Withhold the dry trigger
-		// rather than act on that: the schedule and the daily minimum still run,
-		// and a humidity burst is never urgent.
-		if (!humidityAvgValid_ || elapsed_ms(in.nowMs, humidityAvgSeedMs_) < tauMs) {
-			return false;
-		}
-		return humidityAvg_ <= raiseBelow;
-	}
-	// With the filter switched off there is nothing to average, so the reading
-	// itself is all there is to go on.
-	return in.humidity <= raiseBelow;
-}
-
-/// Whether a humidity burst that has already been asked for is still worth
-/// having.
-///
-/// Deliberately a weaker test than dryRequest(): a burst is raised at
-/// `setpoint - undershoot` and held all the way up to `setpoint`. The gap is
-/// what stops a burst from raising humidity past its own trigger and
-/// immediately cancelling itself, and the numbers for it are already
-/// configured -- no new knob.
-bool VentilationPolicy::dryHolds(const VentilationInputs& in, const VentilationSettings& cfg) const {
-	if (!in.humidityValid) {
-		// The reading that raised this burst has since gone stale. Let the
-		// burst finish rather than cancel it: it is bounded anyway, and a
-		// sensor dropout is not evidence the chamber got wetter.
-		return true;
-	}
-	return in.humidity < cfg.humiditySetpoint;
-}
-
-/// Whether the reason a burst was asked for still applies.
-///
-/// Only humidity can withdraw. Scheduled and make-up bursts exist to exchange
-/// air on a timetable and have no condition to satisfy, and a manual burst is
-/// somebody pressing a button -- second-guessing that is not this function's
-/// job.
-bool VentilationPolicy::triggerHolds(const VentilationInputs& in, const VentilationSettings& cfg) const {
-	if (trigger_ == VentTrigger::Dry) {
-		return dryHolds(in, cfg);
-	}
-	return true;
-}
-
 /// Whether the plate is still warm enough to keep a running burst going.
 ///
 /// A burst that overrode the gate is not subject to it afterwards: forcing a
@@ -245,7 +131,6 @@ VentilationDecision VentilationPolicy::update(const VentilationInputs& in, const
 		bootMsSet_ = true;
 	}
 	rollDayWindow(in);
-	updateHumidityAverage(in, cfg);
 
 	VentilationDecision d;
 
@@ -261,12 +146,8 @@ VentilationDecision VentilationPolicy::update(const VentilationInputs& in, const
 		const char* stop = nullptr;
 		if (elapsed >= burstMs) {
 			stop = "burst complete";
-		} else if (elapsed >= MIN_ON_MS) {
-			if (!plateHolds(in, cfg)) {
-				stop = "plate went cold; burst cut short";
-			} else if (!triggerHolds(in, cfg)) {
-				stop = "reason satisfied; burst cut short";
-			}
+		} else if (elapsed >= MIN_ON_MS && !plateHolds(in, cfg)) {
+			stop = "plate went cold; burst cut short";
 		}
 
 		if (stop != nullptr) {
@@ -274,17 +155,16 @@ VentilationDecision VentilationPolicy::update(const VentilationInputs& in, const
 			burstEndedMs_ = in.nowMs;
 			everBurst_ = true;
 			// Count what actually ran, not what was asked for: a burst whose
-			// settings changed underneath it, or one cut short by the plate or
-			// by its own reason, should contribute what it really contributed.
+			// settings changed underneath it, or one cut short by the plate,
+			// should contribute what it really contributed.
 			dayRunMs_ += elapsed;
 			// Whatever asked for it, a burst is fresh air, so it serves the
 			// schedule slot it ends in. Without this the schedule cannot tell
-			// that the chamber has just been ventilated: on 2026-09-09 a
-			// humidity burst finished ten seconds into the 18:00 slot and the
-			// scheduled burst followed ninety seconds later, taking the chamber
-			// from 63% to 87% RH between them. The no-clock path already
-			// behaves this way, because it measures the interval from the end
-			// of the last burst rather than from a slot boundary.
+			// that the chamber has just been ventilated, and a make-up or
+			// manual burst landing just inside a slot boundary would be
+			// followed by a scheduled one moments later. The no-clock path
+			// already behaves this way, because it measures the interval from
+			// the end of the last burst rather than from a slot boundary.
 			if (in.haveClock) {
 				lastRunSlot_ = current_slot(in.localEpoch, cfg);
 				haveRunSlot_ = true;
@@ -299,7 +179,6 @@ VentilationDecision VentilationPolicy::update(const VentilationInputs& in, const
 		d.state = state_;
 		d.trigger = trigger_;
 		d.reason = trigger_ == VentTrigger::Scheduled ? "scheduled burst"
-				 : trigger_ == VentTrigger::Dry       ? "humidity burst"
 				 : trigger_ == VentTrigger::Makeup    ? "daily minimum burst"
 													  : "manual burst";
 		return d;
@@ -321,30 +200,15 @@ VentilationDecision VentilationPolicy::update(const VentilationInputs& in, const
 		// A burst is owed. Hold it while the plate is below freezing-ish, so
 		// the moisture we bring in has somewhere to go other than straight onto
 		// the coldest surface in the box.
-		// The timeout exists so a cold plate cannot hold *air exchange* off
+		//
+		// The timeout exists so a cold plate cannot hold air exchange off
 		// forever: stale air is a real problem, and a burst owed since this
-		// morning has to happen eventually. Humidity is not that. Forcing a
-		// humidity burst onto sub-zero metal is precisely the mechanism that
-		// armoured the evaporator in the first place, and unlike fresh air,
-		// nothing goes wrong if it simply waits -- the fan cannot dry the
-		// chamber, so a burst it never gets is a burst it did not need.
-		const bool mayForce = trigger_ != VentTrigger::Dry;
-		const bool expired = mayForce &&
+		// morning has to happen eventually. Every trigger here is entitled to
+		// it, because every trigger here is about fresh air on a timetable --
+		// there is no longer a humidity burst that could quietly wait instead.
+		// The humidifier is the one that waits; see HumidifierPolicy.
+		const bool expired =
 			elapsed_ms(in.nowMs, pendingSinceMs_) >= (uint32_t)(cfg.maxDeferMinutes * 60000.0f);
-
-		// A request is not a commitment either. Waiting for the plate takes
-		// minutes, and the chamber does not hold still meanwhile -- humidity
-		// climbs steeply as frost comes back off the warming plate. Firing a
-		// burst that was asked for at 63% into a chamber that is now at 73% is
-		// how a "the chamber is too dry" request ends up making it wetter.
-		if (!triggerHolds(in, cfg)) {
-			state_ = VentState::Idle;
-			trigger_ = VentTrigger::None;
-			d.fanOn = false;
-			d.state = state_;
-			d.reason = "request withdrawn; no longer dry";
-			return d;
-		}
 
 		if (plateAllows(in, cfg) || expired) {
 			state_ = VentState::Running;
@@ -389,8 +253,6 @@ VentilationDecision VentilationPolicy::update(const VentilationInputs& in, const
 	VentTrigger want = VentTrigger::None;
 	if (scheduledDue(in, cfg)) {
 		want = VentTrigger::Scheduled;
-	} else if (dryRequest(in, cfg)) {
-		want = VentTrigger::Dry;
 	} else if (makeupRequest(in, cfg)) {
 		want = VentTrigger::Makeup;
 	}
@@ -416,8 +278,7 @@ VentilationDecision VentilationPolicy::update(const VentilationInputs& in, const
 		burstForced_ = false;
 		d.fanOn = true;
 		d.reason = want == VentTrigger::Scheduled ? "scheduled burst"
-				 : want == VentTrigger::Makeup    ? "daily minimum burst"
-												  : "humidity burst";
+												 : "daily minimum burst";
 	} else {
 		state_ = VentState::Pending;
 		pendingSinceMs_ = in.nowMs;
